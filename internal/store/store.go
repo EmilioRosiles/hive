@@ -9,8 +9,8 @@ import (
 )
 
 // Entry holds a raw byte payload with an optional expiry.
+// expiresAt is always accessed while the parent shard lock is held.
 type Entry struct {
-	mu        sync.RWMutex
 	Data      []byte
 	expiresAt int64
 }
@@ -19,20 +19,14 @@ func NewEntry(data []byte) *Entry {
 	return &Entry{Data: data}
 }
 
-func (e *Entry) ExpiresAt() int64 {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.expiresAt
+// NewEntryWithTTL creates an entry that expires after ttl.
+func NewEntryWithTTL(data []byte, ttl time.Duration) *Entry {
+	return &Entry{Data: data, expiresAt: time.Now().Add(ttl).Unix()}
 }
 
-func (e *Entry) SetTTL(ttl time.Duration) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if ttl == 0 {
-		e.expiresAt = 0
-	} else {
-		e.expiresAt = time.Now().Add(ttl).Unix()
-	}
+// ExpiresAt returns the expiry unix timestamp. Caller must hold the shard lock.
+func (e *Entry) ExpiresAt() int64 {
+	return e.expiresAt
 }
 
 // -- DataStore --
@@ -113,14 +107,17 @@ func (ds *DataStore) Del(key string) {
 
 func (ds *DataStore) Expire(key string, ttl time.Duration) bool {
 	s := ds.getShard(key)
-	s.mu.RLock()
+	s.mu.Lock()
 	e, ok := s.data[key]
-	s.mu.RUnlock()
-	if !ok {
-		return false
+	if ok {
+		if ttl == 0 {
+			e.expiresAt = 0
+		} else {
+			e.expiresAt = time.Now().Add(ttl).Unix()
+		}
 	}
-	e.SetTTL(ttl)
-	return true
+	s.mu.Unlock()
+	return ok
 }
 
 // Scan iterates over all non-expired entries. Pass cursor=-1 to scan all shards.

@@ -2,10 +2,16 @@ package hive
 
 import (
 	"bytes"
-	"encoding/gob"
 	"fmt"
+	"sync"
 	"time"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
+
+var bufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
 
 // Cache is a typed view over a Node. All keys are automatically prefixed
 // with the cache name to prevent collisions between caches on the same node.
@@ -61,15 +67,21 @@ func (c *Cache[T]) Expire(key string, ttl time.Duration) error {
 }
 
 func encode[T any](v T) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(v); err != nil {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
+	if err := msgpack.NewEncoder(buf).Encode(v); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	// Copy out before returning buf to the pool.
+	out := make([]byte, buf.Len())
+	copy(out, buf.Bytes())
+	return out, nil
 }
 
 func decode[T any](data []byte) (T, error) {
 	var v T
-	err := gob.NewDecoder(bytes.NewReader(data)).Decode(&v)
+	err := msgpack.Unmarshal(data, &v)
 	return v, err
 }

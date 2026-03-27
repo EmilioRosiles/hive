@@ -3,6 +3,7 @@ package cluster
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/store"
@@ -19,10 +20,12 @@ func (m *Manager) Set(key string, data []byte) error {
 	return m.forward(nodes[0], transport.ForwardRequest{Op: transport.OpSet, Key: key, Data: data})
 }
 
-// Get retrieves raw bytes for key, forwarding to the responsible node if necessary.
+// Get retrieves raw bytes for key.
+// Serves locally if this node holds a copy (primary or replica),
+// otherwise forwards to the primary.
 func (m *Manager) Get(key string) ([]byte, error) {
 	nodes := m.responsibleNodes(key)
-	if len(nodes) == 0 || nodes[0] == m.cfg.NodeID {
+	if len(nodes) == 0 || slices.Contains(nodes, m.cfg.NodeID) {
 		e, ok := m.store.Get(key)
 		if !ok {
 			return nil, errors.New("not found")

@@ -78,9 +78,11 @@ func (m *Manager) handleRebalance(payload []byte) ([]byte, error) {
 
 	now := time.Now()
 	for _, re := range batch.Entries {
-		e := store.NewEntry(re.Data)
+		var e *store.Entry
 		if re.TTL > 0 {
-			e.SetTTL(time.Duration(re.TTL) - time.Since(now))
+			e = store.NewEntryWithTTL(re.Data, time.Duration(re.TTL)-time.Since(now))
+		} else {
+			e = store.NewEntry(re.Data)
 		}
 		m.store.Set(re.Key, e)
 	}

@@ -1,13 +1,13 @@
 package transport
 
 import (
-	"bytes"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 const defaultTimeout = 3 * time.Second
@@ -85,18 +85,14 @@ func (c *Client) Close() {
 	}
 }
 
-// -- gob helpers used by the cluster layer --
+// -- msgpack helpers used by the cluster layer --
 
-// Encode gob-encodes v into a byte slice.
+// Encode msgpack-encodes v into a byte slice.
 func Encode(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(v); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return msgpack.Marshal(v)
 }
 
-// Decode gob-decodes data into v.
+// Decode msgpack-decodes data into v.
 func Decode(data []byte, v any) error {
-	return gob.NewDecoder(bytes.NewReader(data)).Decode(v)
+	return msgpack.Unmarshal(data, v)
 }

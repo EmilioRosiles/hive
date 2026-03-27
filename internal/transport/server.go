@@ -1,11 +1,12 @@
 package transport
 
 import (
-	"encoding/gob"
 	"fmt"
 	"log/slog"
 	"net"
 	"sync"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Handler processes an inbound message and returns a response payload (gob-encoded)
@@ -57,8 +58,8 @@ func (s *Server) Serve() {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
-	dec := gob.NewDecoder(conn)
-	enc := gob.NewEncoder(conn)
+	dec := msgpack.NewDecoder(conn)
+	enc := msgpack.NewEncoder(conn)
 	var encMu sync.Mutex
 
 	for {

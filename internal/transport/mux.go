@@ -1,13 +1,14 @@
 package transport
 
 import (
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 var errMuxClosed = errors.New("mux: connection closed")
@@ -17,8 +18,8 @@ var errMuxClosed = errors.New("mux: connection closed")
 // to the goroutine that sent the matching request.
 type mux struct {
 	conn    net.Conn
-	enc     *gob.Encoder
-	encMu   sync.Mutex    // serializes writes; gob encoder is not goroutine-safe
+	enc     *msgpack.Encoder
+	encMu   sync.Mutex    // serializes writes; encoder is not goroutine-safe
 	pending sync.Map      // map[uint32]chan Frame
 	nextID  atomic.Uint32
 	done    chan struct{}
@@ -28,7 +29,7 @@ type mux struct {
 func newMux(conn net.Conn) *mux {
 	m := &mux{
 		conn: conn,
-		enc:  gob.NewEncoder(conn),
+		enc:  msgpack.NewEncoder(conn),
 		done: make(chan struct{}),
 	}
 	go m.readLoop()
@@ -69,7 +70,7 @@ func (m *mux) send(frame Frame) (Frame, error) {
 // readLoop reads frames from the connection and routes each to its waiting sender.
 // Returns when the connection is closed or errors.
 func (m *mux) readLoop() {
-	dec := gob.NewDecoder(m.conn)
+	dec := msgpack.NewDecoder(m.conn)
 	for {
 		var frame Frame
 		if err := dec.Decode(&frame); err != nil {
