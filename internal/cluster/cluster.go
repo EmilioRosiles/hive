@@ -86,7 +86,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		go srv.Serve()
 
 		for _, seed := range cfg.Seeds {
-			m.addPeer(seed)
+			m.addPeer("", seed)
 		}
 
 		go m.startGossip()
@@ -127,7 +127,7 @@ func (m *Manager) Peers() []PeerInfo {
 
 // addPeer registers a peer by address and connects to it.
 // No-op if the address belongs to this node.
-func (m *Manager) addPeer(addr string) {
+func (m *Manager) addPeer(nodeID, addr string) {
 	selfAddr := fmt.Sprintf("%s:%d", m.cfg.BindAddr, m.cfg.BindPort)
 	if addr == selfAddr {
 		return
@@ -151,7 +151,7 @@ func (m *Manager) addPeer(addr string) {
 	}
 
 	// New peer — use addr as a temporary ID until gossip tells us the real NodeID.
-	p := &peer{nodeID: "", addr: addr, alive: true, lastSeen: time.Now()}
+	p := &peer{nodeID: nodeID, addr: addr, alive: true, lastSeen: time.Now()}
 	m.peers[addr] = p
 	m.ring.Add(addr)
 	m.clients[addr] = transport.NewClient(addr)

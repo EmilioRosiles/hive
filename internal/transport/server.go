@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 )
 
 // Handler processes an inbound message and returns a response payload (gob-encoded)
@@ -12,6 +13,7 @@ import (
 type Handler func(msgType MsgType, payload []byte) ([]byte, error)
 
 // Server listens for inbound peer connections and dispatches frames to a Handler.
+// Each accepted connection is kept alive and can carry multiple concurrent requests.
 type Server struct {
 	ln      net.Listener
 	handler Handler
@@ -45,29 +47,40 @@ func (s *Server) Serve() {
 				continue
 			}
 		}
-		go s.handle(conn)
+		go s.handleConn(conn)
 	}
 }
 
-func (s *Server) handle(conn net.Conn) {
+// handleConn reads frames from a single persistent connection until it closes.
+// Each frame is dispatched concurrently; the response is written back with the
+// same ID so the remote mux can route it to the correct waiting goroutine.
+func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
-	var frame Frame
-	if err := gob.NewDecoder(conn).Decode(&frame); err != nil {
-		slog.Warn(fmt.Sprintf("transport: decode frame: %v", err))
-		return
-	}
+	dec := gob.NewDecoder(conn)
+	enc := gob.NewEncoder(conn)
+	var encMu sync.Mutex
 
-	respPayload, handlerErr := s.handler(frame.Type, frame.Payload)
+	for {
+		var frame Frame
+		if err := dec.Decode(&frame); err != nil {
+			// Connection closed or peer went away — normal exit.
+			return
+		}
 
-	resp := Frame{Type: frame.Type, Payload: respPayload}
-	if handlerErr != nil {
-		slog.Warn(fmt.Sprintf("transport: handler error (type=%d): %v", frame.Type, handlerErr))
-		resp.Err = handlerErr.Error()
-	}
-
-	if err := gob.NewEncoder(conn).Encode(resp); err != nil {
-		slog.Warn(fmt.Sprintf("transport: encode response: %v", err))
+		go func(f Frame) {
+			respPayload, handlerErr := s.handler(f.Type, f.Payload)
+			resp := Frame{ID: f.ID, Type: f.Type, Payload: respPayload}
+			if handlerErr != nil {
+				slog.Warn(fmt.Sprintf("transport: handler error (type=%d): %v", f.Type, handlerErr))
+				resp.Err = handlerErr.Error()
+			}
+			encMu.Lock()
+			if err := enc.Encode(resp); err != nil {
+				slog.Warn(fmt.Sprintf("transport: encode response: %v", err))
+			}
+			encMu.Unlock()
+		}(frame)
 	}
 }
 

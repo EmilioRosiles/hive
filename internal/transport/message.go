@@ -16,6 +16,7 @@ const (
 
 // Frame is the envelope wrapping every message on the wire.
 type Frame struct {
+	ID      uint32  // request ID used to match responses on a multiplexed connection
 	Type    MsgType
 	Payload []byte // gob-encoded message body
 	Err     string // non-empty if the handler returned an error

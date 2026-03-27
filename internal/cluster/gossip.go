@@ -94,7 +94,7 @@ func (m *Manager) mergeState(remote []transport.PeerState) {
 
 		if !exists {
 			if rs.Alive {
-				m.addPeer(rs.Addr)
+				m.addPeer(rs.NodeID, rs.Addr)
 			}
 			continue
 		}
@@ -108,7 +108,7 @@ func (m *Manager) mergeState(remote []transport.PeerState) {
 			if !rs.Alive && local.alive {
 				m.markDead(rs.NodeID)
 			} else if rs.Alive && !local.alive {
-				m.addPeer(rs.Addr)
+				m.addPeer(rs.NodeID, rs.Addr)
 			}
 		}
 	}
