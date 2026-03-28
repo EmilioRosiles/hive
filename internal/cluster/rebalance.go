@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -55,7 +54,7 @@ func (rm *rebalanceManager) run() {
 	batchesByNode := make(map[string][]transport.RebalanceEntry)
 	var deleteList []string
 
-	m.store.Scan(-1, 0, func(key string, entry *store.Entry) {
+	m.store.Scan(-1, 0, func(key string, entry store.DataStructure) {
 		oldOwners := oldRing.Get(key)
 		newOwners := newRing.Get(key)
 
@@ -67,14 +66,20 @@ func (rm *rebalanceManager) run() {
 		leader := migrationLeader(oldOwners, newOwners, m)
 		if leader == m.cfg.NodeID {
 			ttl := int64(0)
-			if exp := entry.ExpiresAt(); exp != 0 {
+			if exp := entry.KeyExpiry(); exp != 0 {
 				ttl = time.Until(time.Unix(exp, 0)).Nanoseconds()
 				if ttl <= 0 {
 					return // already expired
 				}
 			}
 
-			re := transport.RebalanceEntry{Key: key, Data: entry.Data, TTL: ttl}
+			data, err := entry.Encode()
+			if err != nil {
+				slog.Warn("rebalance: encode failed", "key", key, "err", err)
+				return
+			}
+
+			re := transport.RebalanceEntry{Key: key, Kind: uint8(entry.Kind()), Data: data, TTL: ttl}
 			for _, nodeID := range targets {
 				batchesByNode[nodeID] = append(batchesByNode[nodeID], re)
 			}
@@ -99,7 +104,7 @@ func (rm *rebalanceManager) run() {
 func (m *Manager) sendRebalanceBatch(nodeID string, entries []transport.RebalanceEntry) {
 	client, ok := m.getClient(nodeID)
 	if !ok {
-		slog.Warn(fmt.Sprintf("rebalance: no client for %s", nodeID))
+		slog.Warn("rebalance: no client", "node", nodeID)
 		return
 	}
 
@@ -109,16 +114,16 @@ func (m *Manager) sendRebalanceBatch(nodeID string, entries []transport.Rebalanc
 		batch := transport.RebalanceBatch{Entries: entries[i:end]}
 		payload, err := transport.Encode(batch)
 		if err != nil {
-			slog.Warn(fmt.Sprintf("rebalance: encode batch for %s: %v", nodeID, err))
+			slog.Warn("rebalance: encode batch failed", "node", nodeID, "err", err)
 			continue
 		}
 		if _, err := client.Send(transport.Frame{Type: transport.MsgRebalance, Payload: payload}); err != nil {
-			slog.Warn(fmt.Sprintf("rebalance: send to %s failed: %v", nodeID, err))
+			slog.Warn("rebalance: send failed", "node", nodeID, "err", err)
 			m.markDead(nodeID)
 			return
 		}
 	}
-	slog.Info(fmt.Sprintf("rebalance: migrated %d keys to %s", len(entries), nodeID))
+	slog.Info("rebalance: migration complete", "keys", len(entries), "node", nodeID)
 }
 
 // migrationTargets returns node IDs that are in newOwners but not in oldOwners.

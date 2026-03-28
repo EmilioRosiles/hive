@@ -14,8 +14,8 @@
 //	}
 //	defer node.Shutdown()
 //
-//	sessions := hive.NewCache[Session](node, "sessions")
-//	users    := hive.NewCache[User](node, "users")
+//	sessions := hive.NewValueStore[Session](node, "sessions")
+//	users    := hive.NewValueStore[User](node, "users")
 //
 //	sessions.Set("abc", mySession)
 //	val, err := sessions.Get("abc")
@@ -29,7 +29,7 @@ import (
 )
 
 // Node is a single member of the Hive cluster. Create one per application
-// instance via NewNode. Multiple Cache instances can share a single Node.
+// instance via NewNode. Multiple stores can share a single Node.
 type Node struct {
 	cfg     Config
 	cluster *cluster.Manager
@@ -99,3 +99,4 @@ func randomID() (string, error) {
 	}
 	return fmt.Sprintf("%x", b), nil
 }
+
