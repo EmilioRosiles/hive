@@ -1,4 +1,4 @@
-// Package store provides a thread-safe, sharded in-memory key-value store with TTL support.
+// Package store provides a thread-safe, sharded in-memory store with TTL support.
 package store
 
 import (
@@ -8,35 +8,39 @@ import (
 	"time"
 )
 
-// Entry holds a raw byte payload with an optional expiry.
-// expiresAt is always accessed while the parent shard lock is held.
-type Entry struct {
-	Data      []byte
-	expiresAt int64
-}
+// Kind identifies the type of data structure stored under a key.
+type Kind uint8
 
-func NewEntry(data []byte) *Entry {
-	return &Entry{Data: data}
-}
+const (
+	KindValue Kind = iota
+	KindSet
+	KindHash
+)
 
-// NewEntryWithTTL creates an entry that expires after ttl.
-func NewEntryWithTTL(data []byte, ttl time.Duration) *Entry {
-	return &Entry{Data: data, expiresAt: time.Now().Add(ttl).Unix()}
-}
-
-// ExpiresAt returns the expiry unix timestamp. Caller must hold the shard lock.
-func (e *Entry) ExpiresAt() int64 {
-	return e.expiresAt
+// DataStructure is the common interface for all stored data types.
+type DataStructure interface {
+	Kind() Kind
+	// Cleanup removes any expired sub-fields and reports whether the entry
+	// itself has expired and should be deleted by the janitor.
+	Cleanup(now time.Time) bool
+	// Encode serializes the full state for rebalance migration.
+	Encode() ([]byte, error)
+	// KeyExpiry returns the key-level expiry as a Unix timestamp in seconds,
+	// or 0 if there is no expiry.
+	KeyExpiry() int64
+	// SetKeyExpiry sets the key-level expiry as a Unix timestamp in seconds.
+	// Pass 0 to clear the expiry.
+	SetKeyExpiry(unixSec int64)
 }
 
 // -- DataStore --
 
 type shard struct {
 	mu   sync.RWMutex
-	data map[string]*Entry
+	data map[string]DataStructure
 }
 
-// DataStore is a thread-safe, sharded in-memory key-value store.
+// DataStore is a thread-safe, sharded in-memory store.
 type DataStore struct {
 	shards      []*shard
 	shardsCount uint64
@@ -50,7 +54,7 @@ func NewDataStore(cleanupInterval time.Duration) *DataStore {
 		shardsCount: n,
 	}
 	for i := range n {
-		ds.shards[i] = &shard{data: make(map[string]*Entry)}
+		ds.shards[i] = &shard{data: make(map[string]DataStructure)}
 	}
 	if cleanupInterval > 0 {
 		j := &janitor{interval: cleanupInterval, stop: make(chan struct{})}
@@ -67,16 +71,7 @@ func (ds *DataStore) getShard(key string) *shard {
 	return ds.shards[h.Sum64()&(ds.shardsCount-1)]
 }
 
-// GetEntry returns the entry directly (used by rebalance to read Data + TTL together).
-func (ds *DataStore) GetEntry(key string) *Entry {
-	e, ok := ds.Get(key)
-	if !ok {
-		return nil
-	}
-	return e
-}
-
-func (ds *DataStore) Get(key string) (*Entry, bool) {
+func (ds *DataStore) Get(key string) (DataStructure, bool) {
 	s := ds.getShard(key)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -85,13 +80,13 @@ func (ds *DataStore) Get(key string) (*Entry, bool) {
 	if !ok {
 		return nil, false
 	}
-	if exp := e.ExpiresAt(); exp != 0 && time.Now().Unix() > exp {
+	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() > exp {
 		return nil, false
 	}
 	return e, true
 }
 
-func (ds *DataStore) Set(key string, e *Entry) {
+func (ds *DataStore) Set(key string, e DataStructure) {
 	s := ds.getShard(key)
 	s.mu.Lock()
 	s.data[key] = e
@@ -108,20 +103,57 @@ func (ds *DataStore) Del(key string) {
 func (ds *DataStore) Expire(key string, ttl time.Duration) bool {
 	s := ds.getShard(key)
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	e, ok := s.data[key]
-	if ok {
-		if ttl == 0 {
-			e.expiresAt = 0
-		} else {
-			e.expiresAt = time.Now().Add(ttl).Unix()
-		}
+	if !ok {
+		return false
 	}
-	s.mu.Unlock()
-	return ok
+	if ttl == 0 {
+		e.SetKeyExpiry(0)
+	} else {
+		e.SetKeyExpiry(time.Now().Add(ttl).Unix())
+	}
+	return true
 }
 
-// Scan iterates over all non-expired entries. Pass cursor=-1 to scan all shards.
-func (ds *DataStore) Scan(cursor, count int, fn func(key string, e *Entry)) {
+// Read runs fn under the shard read lock for key.
+// fn is only called if the key exists and has not expired.
+// Multiple readers can proceed concurrently; fn must not block or write.
+func (ds *DataStore) Read(key string, fn func(DataStructure)) {
+	s := ds.getShard(key)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.data[key]
+	if !ok {
+		return
+	}
+	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() > exp {
+		return
+	}
+	fn(e)
+}
+
+// Apply runs fn under the shard write lock for key, replacing the stored entry
+// with the value fn returns. fn receives nil if the key does not exist.
+// If fn returns (nil, nil), the key is deleted.
+func (ds *DataStore) Apply(key string, fn func(DataStructure) (DataStructure, error)) error {
+	s := ds.getShard(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next, err := fn(s.data[key])
+	if err != nil {
+		return err
+	}
+	if next == nil {
+		delete(s.data, key)
+	} else {
+		s.data[key] = next
+	}
+	return nil
+}
+
+// Scan iterates over all live (non-expired) entries. Pass cursor=-1 to scan all shards.
+func (ds *DataStore) Scan(cursor, count int, fn func(key string, e DataStructure)) {
 	now := time.Now().Unix()
 	start, end := cursor, cursor+count
 	if cursor == -1 {
@@ -137,7 +169,7 @@ func (ds *DataStore) Scan(cursor, count int, fn func(key string, e *Entry)) {
 		s := ds.shards[i]
 		s.mu.RLock()
 		for key, e := range s.data {
-			if exp := e.ExpiresAt(); exp != 0 && now > exp {
+			if exp := e.KeyExpiry(); exp != 0 && now > exp {
 				continue
 			}
 			fn(key, e)
@@ -189,12 +221,21 @@ func (j *janitor) run(ds *DataStore) {
 }
 
 func (ds *DataStore) deleteExpired() {
-	now := time.Now().Unix()
+	now := time.Now()
+	nowUnix := now.Unix()
 	for i := range ds.shardsCount {
 		s := ds.shards[i]
 		s.mu.Lock()
 		for key, e := range s.data {
-			if exp := e.ExpiresAt(); exp != 0 && now > exp {
+			// Phase 1: key-level TTL — always evicts the whole entry.
+			if exp := e.KeyExpiry(); exp != 0 && nowUnix > exp {
+				delete(s.data, key)
+				continue
+			}
+			// Phase 2: field-level cleanup (Sets, Hashes).
+			// Cleanup removes expired sub-fields and returns true if the
+			// structure is now empty and should itself be deleted.
+			if e.Cleanup(now) {
 				delete(s.data, key)
 			}
 		}

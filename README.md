@@ -22,7 +22,7 @@ Each instance of your application runs a Hive node. Nodes discover each other th
 - **Leaderless** — every node is equal, no election needed
 - **Self-healing** — nodes that go silent are detected and their keys redistributed
 - **Embeddable** — no sidecar, no separate process, just a Go import
-- **Zero dependencies** — pure stdlib, nothing added to your `go.mod`
+- **Minimal dependencies** — uses [`msgpack`](https://github.com/vmihailenco/msgpack) for serialization, nothing else added to your `go.mod`
 
 ## Installation
 
@@ -93,7 +93,7 @@ sessions   := hive.NewCache[Session](node, "sessions")
 rateLimits := hive.NewCache[RateLimit](node, "rate_limits")
 ```
 
-**Set** stores a value. The struct is gob-encoded internally — exported fields only.
+**Set** stores a value. The struct is msgpack-encoded internally — exported fields only.
 
 ```go
 err := sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
@@ -196,10 +196,9 @@ This makes Hive well-suited for session caches, rate-limit counters, feature fla
 
 ## Data types
 
-Values must be serializable by Go's `encoding/gob` package:
+Values must be serializable by [`msgpack`](https://github.com/vmihailenco/msgpack):
 
 - All fields you want preserved must be **exported**
-- Types containing interfaces require registering concrete types with `gob.Register`
 - Pointers, slices, maps, and structs are all supported
 
 ## Operational notes

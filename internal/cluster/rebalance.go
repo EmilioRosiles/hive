@@ -55,7 +55,7 @@ func (rm *rebalanceManager) run() {
 	batchesByNode := make(map[string][]transport.RebalanceEntry)
 	var deleteList []string
 
-	m.store.Scan(-1, 0, func(key string, entry *store.Entry) {
+	m.store.Scan(-1, 0, func(key string, entry store.DataStructure) {
 		oldOwners := oldRing.Get(key)
 		newOwners := newRing.Get(key)
 
@@ -67,14 +67,20 @@ func (rm *rebalanceManager) run() {
 		leader := migrationLeader(oldOwners, newOwners, m)
 		if leader == m.cfg.NodeID {
 			ttl := int64(0)
-			if exp := entry.ExpiresAt(); exp != 0 {
+			if exp := entry.KeyExpiry(); exp != 0 {
 				ttl = time.Until(time.Unix(exp, 0)).Nanoseconds()
 				if ttl <= 0 {
 					return // already expired
 				}
 			}
 
-			re := transport.RebalanceEntry{Key: key, Data: entry.Data, TTL: ttl}
+			data, err := entry.Encode()
+			if err != nil {
+				slog.Warn(fmt.Sprintf("rebalance: encode %q: %v", key, err))
+				return
+			}
+
+			re := transport.RebalanceEntry{Key: key, Kind: uint8(entry.Kind()), Data: data, TTL: ttl}
 			for _, nodeID := range targets {
 				batchesByNode[nodeID] = append(batchesByNode[nodeID], re)
 			}
