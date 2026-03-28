@@ -20,8 +20,8 @@ const (
 // DataStructure is the common interface for all stored data types.
 type DataStructure interface {
 	Kind() Kind
-	// Cleanup removes any expired sub-fields and reports whether the entry
-	// itself has expired and should be deleted by the janitor.
+	// Cleanup removes any expired sub-fields and reports whether the structure
+	// is now empty and should be deleted by the janitor.
 	Cleanup(now time.Time) bool
 	// Encode serializes the full state for rebalance migration.
 	Encode() ([]byte, error)

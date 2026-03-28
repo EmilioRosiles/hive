@@ -54,7 +54,7 @@ func (m *Manager) heartbeat(targets ...*peer) {
 
 	payload, err := transport.Encode(m.buildHeartbeatRequest())
 	if err != nil {
-		slog.Warn(fmt.Sprintf("gossip: encode heartbeat: %v", err))
+		slog.Warn("gossip: encode heartbeat failed", "err", err)
 		return
 	}
 	frame := transport.Frame{Type: transport.MsgHeartbeat, Payload: payload}
@@ -68,14 +68,14 @@ func (m *Manager) heartbeat(targets ...*peer) {
 
 		resp, err := client.Send(frame)
 		if err != nil {
-			slog.Warn(fmt.Sprintf("gossip: heartbeat failed for %s: %v", p.nodeID, err))
+			slog.Warn("gossip: heartbeat failed", "node", p.nodeID, "err", err)
 			m.markDead(p.nodeID)
 			continue
 		}
 
 		var hbResp transport.HeartbeatResponse
 		if err := transport.Decode(resp.Payload, &hbResp); err != nil {
-			slog.Warn(fmt.Sprintf("gossip: decode response from %s: %v", p.nodeID, err))
+			slog.Warn("gossip: decode response failed", "node", p.nodeID, "err", err)
 			continue
 		}
 

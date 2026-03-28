@@ -8,9 +8,9 @@ import "time"
 // Members can carry an optional TTL that evicts them independently of the key:
 //
 //	online := hive.NewSetStore(node, "online_users")
-//	online.Add("room:1", "user:123")
-//	online.ExpireMember("room:1", "user:123", 30*time.Second)
-//	members, _ := online.Members("room:1")
+//	online.SAdd("room:1", "user:123")
+//	online.SExpireMember("room:1", "user:123", 30*time.Second)
+//	members, _ := online.SMembers("room:1")
 type SetStore struct {
 	node   *Node
 	prefix string

@@ -92,7 +92,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		go m.startGossip()
 	}
 
-	slog.Info(fmt.Sprintf("hive: node %s started (clustered=%v)", cfg.NodeID, cfg.Clustered))
+	slog.Info("hive: node started", "node", cfg.NodeID, "clustered", cfg.Clustered)
 	return m, nil
 }
 
@@ -157,7 +157,7 @@ func (m *Manager) addPeer(nodeID, addr string) {
 	m.clients[addr] = transport.NewClient(addr)
 	go m.rebalance.schedule()
 
-	slog.Info(fmt.Sprintf("cluster: added peer %s", addr))
+	slog.Info("cluster: added peer", "addr", addr)
 }
 
 // markDead flags a peer as unreachable and drops its client connection,
@@ -174,7 +174,7 @@ func (m *Manager) markDead(nodeID string) {
 	p.lastSeen = time.Now()
 	delete(m.clients, nodeID)
 
-	slog.Warn(fmt.Sprintf("cluster: peer %s marked dead", nodeID))
+	slog.Warn("cluster: peer marked dead", "node", nodeID)
 }
 
 // evictPeer removes a peer from the ring and triggers rebalance.
@@ -191,7 +191,7 @@ func (m *Manager) evictPeer(nodeID string) {
 	m.ring.Remove(nodeID)
 	go m.rebalance.schedule()
 
-	slog.Warn(fmt.Sprintf("cluster: peer %s evicted (was dead for > DeadTimeout)", p.addr))
+	slog.Warn("cluster: peer evicted", "addr", p.addr)
 }
 
 // getPeer returns a peer by node ID.

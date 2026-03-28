@@ -78,9 +78,9 @@ func (h *HashStore[T]) HKeys(key string) ([]string, error) {
 	return h.node.cluster.HKeys(h.prefix + key)
 }
 
-// Del removes the entire set at key.
-func (s *HashStore[T]) Del(key string) error {
-	return s.node.cluster.Del(s.prefix + key)
+// Del removes the entire hash at key.
+func (h *HashStore[T]) Del(key string) error {
+	return h.node.cluster.Del(h.prefix + key)
 }
 
 // Expire sets a key-level TTL. The entire hash is deleted after ttl elapses.

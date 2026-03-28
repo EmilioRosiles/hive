@@ -67,7 +67,7 @@ const (
 	OpHGet         Op = 101
 	OpHDel         Op = 102
 	OpHGetAll      Op = 103
-	OpHFields      Op = 104
+	OpHKeys        Op = 104
 	OpHExpireField Op = 105
 )
 

@@ -9,7 +9,7 @@ node, _ := hive.NewNode(hive.Config{
 })
 defer node.Shutdown()
 
-sessions := hive.NewCache[Session](node, "sessions")
+sessions := hive.NewValueStore[Session](node, "sessions")
 
 sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
 s, err := sessions.Get("user:123")
@@ -43,7 +43,7 @@ if err != nil {
 }
 defer node.Shutdown()
 
-counters := hive.NewCache[int](node, "counters")
+counters := hive.NewValueStore[int](node, "counters")
 counters.Set("visits", 42)
 
 v, err := counters.Get("visits")
@@ -72,54 +72,6 @@ node, err := hive.NewNode(hive.Config{
 })
 ```
 
-### Working with caches
-
-Create a typed `Cache` per logical data type. Multiple caches share the same node — they are just namespaced views over the same cluster.
-
-```go
-type Session struct {
-    UserID int
-    Token  string
-}
-
-type RateLimit struct {
-    Count     int
-    WindowEnd time.Time
-}
-
-node, _ := hive.NewNode(cfg)
-
-sessions   := hive.NewCache[Session](node, "sessions")
-rateLimits := hive.NewCache[RateLimit](node, "rate_limits")
-```
-
-**Set** stores a value. The struct is msgpack-encoded internally — exported fields only.
-
-```go
-err := sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
-```
-
-**Get** retrieves and decodes a value. Returns an error if the key does not exist or has expired.
-
-```go
-s, err := sessions.Get("user:123")
-if err != nil {
-    // key missing or expired
-}
-```
-
-**Del** removes a key.
-
-```go
-sessions.Del("user:123")
-```
-
-**Expire** sets a TTL. The key is deleted automatically after the duration elapses.
-
-```go
-sessions.Expire("user:123", 30*time.Minute)
-```
-
 ### Checking cluster state
 
 ```go
@@ -129,6 +81,107 @@ for _, p := range status.Peers {
     fmt.Printf("  peer %s addr=%s alive=%v\n", p.NodeID, p.Addr, p.Alive)
 }
 ```
+
+## Stores
+
+Multiple stores can share the same node — they are namespaced views over the same underlying cluster. Each store type maps to a Redis-style API.
+
+### ValueStore[T]
+
+A typed key/value store. Values are msgpack-encoded structs or scalars.
+
+```go
+type Session struct {
+    UserID int
+    Token  string
+}
+
+sessions := hive.NewValueStore[Session](node, "sessions")
+
+// Set stores a value.
+err := sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
+
+// Get retrieves and decodes a value. Errors if missing or expired.
+s, err := sessions.Get("user:123")
+
+// Del removes a key.
+sessions.Del("user:123")
+
+// Expire sets a TTL. The key is deleted automatically after the duration elapses.
+sessions.Expire("user:123", 30*time.Minute)
+```
+
+### SetStore
+
+A distributed string set. Members can carry independent per-member TTLs, making it useful for tracking presence or short-lived memberships.
+
+```go
+online := hive.NewSetStore(node, "online_users")
+
+// SAdd adds a member to the set at key.
+online.SAdd("room:1", "user:123")
+
+// SExpireMember sets a per-member TTL. Other members and the key are unaffected.
+online.SExpireMember("room:1", "user:123", 30*time.Second)
+
+// SMembers returns all live members.
+members, err := online.SMembers("room:1")
+
+// SIsMember checks membership.
+ok, err := online.SIsMember("room:1", "user:123")
+
+// SCard returns the number of live members.
+n, err := online.SCard("room:1")
+
+// SRem removes a single member.
+online.SRem("room:1", "user:123")
+
+// Del removes the entire set. Expire sets a key-level TTL.
+online.Del("room:1")
+online.Expire("room:1", 5*time.Minute)
+```
+
+### HashStore[T]
+
+A typed key/field/value store. Fields within a key carry independent TTLs, making it well-suited for tracking per-entity state with automatic eviction.
+
+```go
+type Stream struct {
+    StartedAt time.Time
+    BitRate   int
+}
+
+streams := hive.NewHashStore[Stream](node, "streams")
+
+// HSet stores a value under key/field.
+streams.HSet("user:123", "stream:abc", Stream{StartedAt: time.Now()})
+
+// HExpireField sets a TTL on a single field. Other fields are unaffected.
+streams.HExpireField("user:123", "stream:abc", 30*time.Minute)
+
+// HGet retrieves and decodes a single field.
+s, err := streams.HGet("user:123", "stream:abc")
+
+// HGetAll retrieves all live fields under a key.
+all, err := streams.HGetAll("user:123")
+
+// HKeys returns the names of all live fields.
+fields, err := streams.HKeys("user:123")
+
+// HDel removes a single field.
+streams.HDel("user:123", "stream:abc")
+
+// Del removes the entire hash. Expire sets a key-level TTL.
+streams.Del("user:123")
+streams.Expire("user:123", 1*time.Hour)
+```
+
+## TTL behavior
+
+All stores support two levels of TTL:
+
+- **Key-level TTL** (`Expire`) — deletes the entire key when it elapses
+- **Field-level TTL** (`SExpireMember`, `HExpireField`) — evicts a single member or field independently, without affecting other members or the key itself. If all members/fields expire, the key is cleaned up automatically.
 
 ## Configuration
 
@@ -192,7 +245,7 @@ Hive is an **ephemeral, eventually consistent** cache.
 - If two partitioned sub-clusters both accept writes to the same key and later merge, the last rebalance wins (determined by ring ownership after the merge, not by write timestamp)
 - There is no durability — a node restart loses its local data. Surviving replicas retain their copies
 
-This makes Hive well-suited for session caches, rate-limit counters, feature flags, and other short-lived shared state where occasional staleness is acceptable.
+This makes Hive well-suited for session caches, rate-limit counters, presence tracking, stream limits, and other short-lived shared state where occasional staleness is acceptable.
 
 ## Data types
 

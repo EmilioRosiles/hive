@@ -280,7 +280,7 @@ func (m *Manager) HKeys(key string) ([]string, error) {
 		})
 		return result, nil
 	}
-	resp, err := m.forwardOpWithResponse(nodes[0], transport.OpHFields, key, nil)
+	resp, err := m.forwardOpWithResponse(nodes[0], transport.OpHKeys, key, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -432,7 +432,5 @@ func (m *Manager) replicateOp(op transport.Op, key string, payload any, nodes []
 }
 
 func (m *Manager) handlePeerError(nodeID string, err error) {
-	if err != nil {
-		m.markDead(nodeID)
-	}
+	m.markDead(nodeID)
 }

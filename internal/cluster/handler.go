@@ -33,7 +33,7 @@ var opRegistry = map[transport.Op]opFn{
 	transport.OpHGet:         execHGet,
 	transport.OpHDel:         execHDel,
 	transport.OpHGetAll:      execHGetAll,
-	transport.OpHFields:      execHFields,
+	transport.OpHKeys:        execHKeys,
 	transport.OpHExpireField: execHExpireField,
 }
 
@@ -93,7 +93,11 @@ func (m *Manager) handleRebalance(payload []byte) ([]byte, error) {
 		switch store.Kind(re.Kind) {
 		case store.KindValue:
 			var e *store.ValueStructure
-			e = store.NewValueStructureWithTTL(re.Data, ttl)
+			if re.TTL > 0 {
+				e = store.NewValueStructureWithTTL(re.Data, ttl)
+			} else {
+				e = store.NewValueStructure(re.Data)
+			}
 			m.store.Set(re.Key, e)
 		case store.KindSet:
 			ss, err := store.DecodeSetStructure(re.Data)
@@ -310,7 +314,7 @@ func execHGetAll(m *Manager, key string, _ []byte) ([]byte, error) {
 	return transport.Encode(transport.MapResponse{Values: result})
 }
 
-func execHFields(m *Manager, key string, _ []byte) ([]byte, error) {
+func execHKeys(m *Manager, key string, _ []byte) ([]byte, error) {
 	var fields []string
 	m.store.Read(key, func(ds store.DataStructure) {
 		if h, ok := ds.(*store.HashStructure); ok {
