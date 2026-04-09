@@ -86,7 +86,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		go srv.Serve()
 
 		for _, seed := range cfg.Seeds {
-			m.addPeer("", seed)
+			m.bootstrap(seed)
 		}
 
 		go m.startGossip()
@@ -125,39 +125,37 @@ func (m *Manager) Peers() []PeerInfo {
 	return out
 }
 
-// addPeer registers a peer by address and connects to it.
-// No-op if the address belongs to this node.
-func (m *Manager) addPeer(nodeID, addr string) {
+// addPeer registers a peer and opens a connection to it.
+// No-op if the peer is this node, or already known and alive.
+// ps must have a non-empty NodeID — bootstrap ensures this before any peer
+// is inserted into the ring.
+func (m *Manager) addPeer(ps transport.PeerState) {
 	selfAddr := fmt.Sprintf("%s:%d", m.cfg.BindAddr, m.cfg.BindPort)
-	if addr == selfAddr {
+	if ps.Addr == selfAddr {
 		return
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if we already know this peer by address.
-	for _, p := range m.peers {
-		if p.addr == addr {
-			if !p.alive {
-				p.alive = true
-				p.lastSeen = time.Now()
-				m.ring.Add(p.nodeID)
-				m.clients[p.nodeID] = transport.NewClient(addr)
-				go m.rebalance.schedule()
-			}
-			return
+	if p, ok := m.peers[ps.NodeID]; ok {
+		if !p.alive {
+			p.alive = true
+			p.lastSeen = time.Now()
+			m.ring.Add(ps.NodeID)
+			m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
+			go m.rebalance.schedule()
 		}
+		return
 	}
 
-	// New peer — use addr as a temporary ID until gossip tells us the real NodeID.
-	p := &peer{nodeID: nodeID, addr: addr, alive: true, lastSeen: time.Now()}
-	m.peers[addr] = p
-	m.ring.Add(addr)
-	m.clients[addr] = transport.NewClient(addr)
+	p := &peer{nodeID: ps.NodeID, addr: ps.Addr, alive: true, lastSeen: time.Now()}
+	m.peers[ps.NodeID] = p
+	m.ring.Add(ps.NodeID)
+	m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
 	go m.rebalance.schedule()
 
-	slog.Info("cluster: added peer", "addr", addr)
+	slog.Info("cluster: added peer", "nodeID", ps.NodeID, "addr", ps.Addr)
 }
 
 // markDead flags a peer as unreachable and drops its client connection,

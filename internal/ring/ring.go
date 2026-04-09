@@ -5,7 +5,6 @@ package ring
 import (
 	"encoding/binary"
 	"fmt"
-	"hash"
 	"hash/fnv"
 	"log/slog"
 	"sort"
@@ -21,7 +20,6 @@ type vNode struct {
 // Ring is a thread-safe consistent hash ring.
 type Ring struct {
 	mu         sync.RWMutex
-	hash       hash.Hash32
 	vNodeCount int
 	Replicas   int
 	vNodes     []vNode
@@ -31,7 +29,6 @@ func New(vNodeCount int, replicas int) *Ring {
 	return &Ring{
 		vNodeCount: vNodeCount,
 		Replicas:   replicas,
-		hash:       fnv.New32a(),
 	}
 }
 
@@ -42,10 +39,7 @@ func (r *Ring) Add(nodeIDs ...string) {
 
 	for _, node := range nodeIDs {
 		for i := 0; i < r.vNodeCount; i++ {
-			r.hash.Write([]byte(strconv.Itoa(i) + node))
-			h := r.hash.Sum32()
-			r.hash.Reset()
-			r.vNodes = append(r.vNodes, vNode{hash: h, nodeID: node})
+			r.vNodes = append(r.vNodes, vNode{hash: hashKey(strconv.Itoa(i) + node), nodeID: node})
 		}
 	}
 	sort.Slice(r.vNodes, func(i, j int) bool { return r.vNodes[i].hash < r.vNodes[j].hash })
@@ -75,10 +69,7 @@ func (r *Ring) Get(key string) []string {
 		return []string{}
 	}
 
-	r.hash.Write([]byte(key))
-	h := r.hash.Sum32()
-	r.hash.Reset()
-
+	h := hashKey(key)
 	idx := sort.Search(len(r.vNodes), func(i int) bool {
 		return r.vNodes[i].hash >= h
 	})
@@ -150,13 +141,19 @@ func (r *Ring) GetVersion() uint64 {
 	return hasher.Sum64()
 }
 
+// hashKey returns the FNV-1a 32-bit hash of s.
+func hashKey(s string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return h.Sum32()
+}
+
 // Copy returns a point-in-time snapshot of the ring.
 func (r *Ring) Copy() *Ring {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	c := &Ring{
-		hash:       r.hash,
 		vNodeCount: r.vNodeCount,
 		Replicas:   r.Replicas,
 		vNodes:     make([]vNode, len(r.vNodes)),

@@ -3,6 +3,7 @@ package cluster
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/store"
@@ -87,37 +88,21 @@ func (m *Manager) handleRebalance(payload []byte) ([]byte, error) {
 	if err := transport.Decode(payload, &batch); err != nil {
 		return nil, fmt.Errorf("handler: decode rebalance: %w", err)
 	}
-	now := time.Now()
+	received := time.Now()
 	for _, re := range batch.Entries {
-		ttl := time.Duration(re.TTL) - time.Since(now)
-		switch store.Kind(re.Kind) {
-		case store.KindValue:
-			var e *store.ValueStructure
-			if re.TTL > 0 {
-				e = store.NewValueStructureWithTTL(re.Data, ttl)
-			} else {
-				e = store.NewValueStructure(re.Data)
-			}
-			m.store.Set(re.Key, e)
-		case store.KindSet:
-			ss, err := store.DecodeSetStructure(re.Data)
-			if err != nil {
-				continue
-			}
-			if re.TTL > 0 {
-				ss.SetKeyExpiry(now.Add(ttl).Unix())
-			}
-			m.store.Set(re.Key, ss)
-		case store.KindHash:
-			hs, err := store.DecodeHashStructure(re.Data)
-			if err != nil {
-				continue
-			}
-			if re.TTL > 0 {
-				hs.SetKeyExpiry(now.Add(ttl).Unix())
-			}
-			m.store.Set(re.Key, hs)
+		entry, err := m.store.DecodeEntry(store.Kind(re.Kind), re.Data)
+		if err != nil {
+			slog.Warn("rebalance: decode entry failed", "key", re.Key, "err", err)
+			continue
 		}
+		if re.TTL > 0 {
+			remaining := time.Duration(re.TTL) - time.Since(received)
+			if remaining <= 0 {
+				continue // expired in transit
+			}
+			entry.SetKeyExpiry(received.Add(remaining).Unix())
+		}
+		m.store.Set(re.Key, entry)
 	}
 	return nil, nil
 }

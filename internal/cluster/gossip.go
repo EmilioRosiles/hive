@@ -3,7 +3,7 @@ package cluster
 import (
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
@@ -15,7 +15,7 @@ func (m *Manager) startGossip() {
 	jitterRange := time.Duration(float64(interval) * 0.25)
 
 	for {
-		jitter := time.Duration(rand.Int63n(int64(jitterRange)*2)) - jitterRange
+		jitter := time.Duration(rand.Int64N(int64(jitterRange)*2)) - jitterRange
 		select {
 		case <-m.stopCh:
 			return
@@ -83,10 +83,34 @@ func (m *Manager) heartbeat(targets ...*peer) {
 	}
 }
 
+// bootstrap sends a heartbeat to addr and merges the response into our cluster
+// view. This is called once per seed at startup so the ring is populated with
+// real NodeIDs before the gossip loop begins. Unreachable seeds are skipped —
+// at least one must succeed for the node to join the cluster.
+func (m *Manager) bootstrap(addr string) {
+	payload, err := transport.Encode(m.buildHeartbeatRequest())
+	if err != nil {
+		return
+	}
+	client := transport.NewClient(addr)
+	resp, err := client.Send(transport.Frame{Type: transport.MsgHeartbeat, Payload: payload})
+	if err != nil {
+		slog.Warn("bootstrap: seed unreachable", "addr", addr, "err", err)
+		return
+	}
+	var hbResp transport.HeartbeatResponse
+	if err := transport.Decode(resp.Payload, &hbResp); err != nil {
+		slog.Warn("bootstrap: decode failed", "addr", addr, "err", err)
+		return
+	}
+	m.mergeState(hbResp.Peers)
+	slog.Info("bootstrap: joined via seed", "addr", addr, "peers", len(hbResp.Peers))
+}
+
 // mergeState reconciles a peer's view of the cluster with our own.
 func (m *Manager) mergeState(remote []transport.PeerState) {
 	for _, rs := range remote {
-		if rs.NodeID == m.cfg.NodeID {
+		if rs.NodeID == "" || rs.NodeID == m.cfg.NodeID {
 			continue
 		}
 
@@ -94,7 +118,7 @@ func (m *Manager) mergeState(remote []transport.PeerState) {
 
 		if !exists {
 			if rs.Alive {
-				m.addPeer(rs.NodeID, rs.Addr)
+				m.addPeer(rs)
 			}
 			continue
 		}
@@ -108,7 +132,7 @@ func (m *Manager) mergeState(remote []transport.PeerState) {
 			if !rs.Alive && local.alive {
 				m.markDead(rs.NodeID)
 			} else if rs.Alive && !local.alive {
-				m.addPeer(rs.NodeID, rs.Addr)
+				m.addPeer(rs)
 			}
 		}
 	}

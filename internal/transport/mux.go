@@ -19,8 +19,8 @@ var errMuxClosed = errors.New("mux: connection closed")
 type mux struct {
 	conn    net.Conn
 	enc     *msgpack.Encoder
-	encMu   sync.Mutex    // serializes writes; encoder is not goroutine-safe
-	pending sync.Map      // map[uint32]chan Frame
+	encMu   sync.Mutex // serializes writes; encoder is not goroutine-safe
+	pending sync.Map   // map[uint32]chan Frame
 	nextID  atomic.Uint32
 	done    chan struct{}
 	once    sync.Once

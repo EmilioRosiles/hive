@@ -2,6 +2,7 @@
 package store
 
 import (
+	"fmt"
 	"hash/fnv"
 	"runtime"
 	"sync"
@@ -16,6 +17,9 @@ const (
 	KindSet
 	KindHash
 )
+
+// DecodeFunc deserializes a DataStructure from bytes produced by its Encode method.
+type DecodeFunc func(data []byte) (DataStructure, error)
 
 // DataStructure is the common interface for all stored data types.
 type DataStructure interface {
@@ -45,6 +49,7 @@ type DataStore struct {
 	shards      []*shard
 	shardsCount uint64
 	janitor     *janitor
+	decoders    map[Kind]DecodeFunc
 }
 
 func NewDataStore(cleanupInterval time.Duration) *DataStore {
@@ -52,6 +57,11 @@ func NewDataStore(cleanupInterval time.Duration) *DataStore {
 	ds := &DataStore{
 		shards:      make([]*shard, n),
 		shardsCount: n,
+		decoders: map[Kind]DecodeFunc{
+			KindValue: func(data []byte) (DataStructure, error) { return NewValueStructure(data), nil },
+			KindSet:   func(data []byte) (DataStructure, error) { return DecodeSetStructure(data) },
+			KindHash:  func(data []byte) (DataStructure, error) { return DecodeHashStructure(data) },
+		},
 	}
 	for i := range n {
 		ds.shards[i] = &shard{data: make(map[string]DataStructure)}
@@ -63,6 +73,15 @@ func NewDataStore(cleanupInterval time.Duration) *DataStore {
 		runtime.SetFinalizer(ds, stopJanitor)
 	}
 	return ds
+}
+
+// DecodeEntry deserializes an entry of the given Kind using the registered decoder.
+func (ds *DataStore) DecodeEntry(kind Kind, data []byte) (DataStructure, error) {
+	fn, ok := ds.decoders[kind]
+	if !ok {
+		return nil, fmt.Errorf("store: no decoder registered for kind %d", kind)
+	}
+	return fn(data)
 }
 
 func (ds *DataStore) getShard(key string) *shard {
