@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -26,11 +25,11 @@ func (m *Manager) Get(key string) ([]byte, error) {
 	if len(nodes) == 0 || slices.Contains(nodes, m.cfg.NodeID) {
 		e, ok := m.store.Get(key)
 		if !ok {
-			return nil, errors.New("not found")
+			return nil, ErrNotFound
 		}
 		v, ok := e.(*store.ValueStructure)
 		if !ok {
-			return nil, errors.New("type mismatch")
+			return nil, errTypeMismatch
 		}
 		return v.Data, nil
 	}
@@ -87,7 +86,7 @@ func (m *Manager) SRem(key, member string) error {
 			}
 			ss, ok := ds.(*store.SetStructure)
 			if !ok {
-				return nil, errors.New("type mismatch: not a set")
+				return nil, errNotASet
 			}
 			ss.Remove(member)
 			return ss, nil
@@ -174,7 +173,7 @@ func (m *Manager) SExpireMember(key, member string, ttl time.Duration) error {
 			}
 			ss, ok := ds.(*store.SetStructure)
 			if !ok {
-				return nil, errors.New("type mismatch: not a set")
+				return nil, errNotASet
 			}
 			ss.ExpireMember(member, ttl)
 			return ss, nil
@@ -211,7 +210,7 @@ func (m *Manager) HGet(key, field string) ([]byte, error) {
 			}
 		})
 		if data == nil {
-			return nil, errors.New("not found")
+			return nil, ErrNotFound
 		}
 		return data, nil
 	}
@@ -235,7 +234,7 @@ func (m *Manager) HDel(key, field string) error {
 			}
 			h, ok := ds.(*store.HashStructure)
 			if !ok {
-				return nil, errors.New("type mismatch: not a hash")
+				return nil, errNotAHash
 			}
 			h.HDel(field)
 			return h, nil
@@ -300,7 +299,7 @@ func (m *Manager) HExpireField(key, field string, ttl time.Duration) error {
 			}
 			h, ok := ds.(*store.HashStructure)
 			if !ok {
-				return nil, errors.New("type mismatch: not a hash")
+				return nil, errNotAHash
 			}
 			h.ExpireField(field, ttl)
 			return h, nil
@@ -323,7 +322,7 @@ func applyHSet(ds store.DataStructure, field string, data []byte, ttl time.Durat
 		var ok bool
 		h, ok = ds.(*store.HashStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a hash")
+			return nil, errNotAHash
 		}
 	}
 	if ttl > 0 {
@@ -343,7 +342,7 @@ func applyAdd(ds store.DataStructure, member string, ttl time.Duration) (store.D
 		var ok bool
 		ss, ok = ds.(*store.SetStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a set")
+			return nil, errNotASet
 		}
 	}
 	if ttl > 0 {

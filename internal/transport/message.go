@@ -24,10 +24,11 @@ type Frame struct {
 // -- Heartbeat --
 
 type PeerState struct {
-	NodeID   string
-	Addr     string
-	Alive    bool
-	LastSeen time.Time
+	NodeID            string
+	Addr              string
+	Alive             bool
+	LastSeen          time.Time
+	ReplicationFactor int
 }
 
 type HeartbeatRequest struct {

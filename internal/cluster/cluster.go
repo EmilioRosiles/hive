@@ -29,19 +29,14 @@ type Config struct {
 	Clustered         bool
 }
 
-// PeerInfo is a read-only snapshot of a peer's state.
+// PeerInfo is the canonical peer representation used both as internal mutable
+// state and as the read-only snapshot returned by Peers().
 type PeerInfo struct {
-	NodeID   string
-	Addr     string
-	Alive    bool
-	LastSeen time.Time
-}
-
-type peer struct {
-	nodeID   string
-	addr     string
-	alive    bool
-	lastSeen time.Time
+	NodeID            string
+	Addr              string
+	Alive             bool
+	LastSeen          time.Time
+	ReplicationFactor int
 }
 
 // Manager owns the cluster state for this node.
@@ -50,7 +45,7 @@ type Manager struct {
 	cfg       Config
 	ring      *ring.Ring
 	store     *store.DataStore
-	peers     map[string]*peer
+	peers     map[string]*PeerInfo
 	clients   map[string]*transport.Client
 	rebalance *rebalanceManager
 	server    *transport.Server
@@ -67,7 +62,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg:     cfg,
 		ring:    r,
 		store:   ds,
-		peers:   make(map[string]*peer),
+		peers:   make(map[string]*PeerInfo),
 		clients: make(map[string]*transport.Client),
 		stopCh:  make(chan struct{}),
 	}
@@ -115,47 +110,49 @@ func (m *Manager) Peers() []PeerInfo {
 
 	out := make([]PeerInfo, 0, len(m.peers))
 	for _, p := range m.peers {
-		out = append(out, PeerInfo{
-			NodeID:   p.nodeID,
-			Addr:     p.addr,
-			Alive:    p.alive,
-			LastSeen: p.lastSeen,
-		})
+		out = append(out, *p)
 	}
 	return out
 }
 
 // addPeer registers a peer and opens a connection to it.
-// No-op if the peer is this node, or already known and alive.
+// Returns an error if the peer's ReplicationFactor conflicts with ours.
+// No-op if the peer is already known and alive.
 // ps must have a non-empty NodeID — bootstrap ensures this before any peer
 // is inserted into the ring.
-func (m *Manager) addPeer(ps transport.PeerState) {
-	selfAddr := fmt.Sprintf("%s:%d", m.cfg.BindAddr, m.cfg.BindPort)
-	if ps.Addr == selfAddr {
-		return
+func (m *Manager) addPeer(ps transport.PeerState) error {
+	if ps.ReplicationFactor != 0 && ps.ReplicationFactor != m.cfg.ReplicationFactor {
+		return fmt.Errorf("replication factor mismatch: local=%d peer=%d (addr=%s) — all nodes must be configured with the same ReplicationFactor",
+			m.cfg.ReplicationFactor, ps.ReplicationFactor, ps.Addr)
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if p, ok := m.peers[ps.NodeID]; ok {
-		if !p.alive {
-			p.alive = true
-			p.lastSeen = time.Now()
+		if !p.Alive {
+			p.Alive = true
+			p.LastSeen = time.Now()
 			m.ring.Add(ps.NodeID)
 			m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
 			go m.rebalance.schedule()
 		}
-		return
+		return nil
 	}
 
-	p := &peer{nodeID: ps.NodeID, addr: ps.Addr, alive: true, lastSeen: time.Now()}
-	m.peers[ps.NodeID] = p
+	m.peers[ps.NodeID] = &PeerInfo{
+		NodeID:            ps.NodeID,
+		Addr:              ps.Addr,
+		Alive:             true,
+		LastSeen:          time.Now(),
+		ReplicationFactor: ps.ReplicationFactor,
+	}
 	m.ring.Add(ps.NodeID)
 	m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
 	go m.rebalance.schedule()
 
 	slog.Info("cluster: added peer", "nodeID", ps.NodeID, "addr", ps.Addr)
+	return nil
 }
 
 // markDead flags a peer as unreachable and drops its client connection,
@@ -165,11 +162,11 @@ func (m *Manager) markDead(nodeID string) {
 	defer m.mu.Unlock()
 
 	p, ok := m.peers[nodeID]
-	if !ok || !p.alive {
+	if !ok || !p.Alive {
 		return
 	}
-	p.alive = false
-	p.lastSeen = time.Now()
+	p.Alive = false
+	p.LastSeen = time.Now()
 	delete(m.clients, nodeID)
 
 	slog.Warn("cluster: peer marked dead", "node", nodeID)
@@ -189,11 +186,11 @@ func (m *Manager) evictPeer(nodeID string) {
 	m.ring.Remove(nodeID)
 	go m.rebalance.schedule()
 
-	slog.Warn("cluster: peer evicted", "addr", p.addr)
+	slog.Warn("cluster: peer evicted", "addr", p.Addr)
 }
 
 // getPeer returns a peer by node ID.
-func (m *Manager) getPeer(nodeID string) (*peer, bool) {
+func (m *Manager) getPeer(nodeID string) (*PeerInfo, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	p, ok := m.peers[nodeID]
@@ -209,13 +206,13 @@ func (m *Manager) getClient(nodeID string) (*transport.Client, bool) {
 }
 
 // randomAlivePeers returns up to n randomly selected alive peers.
-func (m *Manager) randomAlivePeers(n int) []*peer {
+func (m *Manager) randomAlivePeers(n int) []*PeerInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	alive := make([]*peer, 0, len(m.peers))
+	alive := make([]*PeerInfo, 0, len(m.peers))
 	for _, p := range m.peers {
-		if p.alive {
+		if p.Alive {
 			alive = append(alive, p)
 		}
 	}

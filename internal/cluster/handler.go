@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -59,7 +58,9 @@ func (m *Manager) handleHeartbeat(payload []byte) ([]byte, error) {
 	if err := transport.Decode(payload, &req); err != nil {
 		return nil, fmt.Errorf("handler: decode heartbeat: %w", err)
 	}
-	m.mergeState(req.Peers)
+	if err := m.mergeState(req.Peers); err != nil {
+		return nil, err
+	}
 	resp := transport.HeartbeatResponse{Peers: m.buildHeartbeatRequest().Peers}
 	return transport.Encode(resp)
 }
@@ -147,11 +148,11 @@ func execValueSet(m *Manager, key string, payload []byte) ([]byte, error) {
 func execValueGet(m *Manager, key string, _ []byte) ([]byte, error) {
 	e, ok := m.store.Get(key)
 	if !ok {
-		return nil, errors.New("not found")
+		return nil, ErrNotFound
 	}
 	v, ok := e.(*store.ValueStructure)
 	if !ok {
-		return nil, errors.New("type mismatch")
+		return nil, errTypeMismatch
 	}
 	resp, err := transport.Encode(transport.DataResponse{Data: v.Data})
 	if err != nil {
@@ -183,7 +184,7 @@ func execSRem(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 		ss, ok := ds.(*store.SetStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a set")
+			return nil, errNotASet
 		}
 		ss.Remove(p.Member)
 		return ss, nil
@@ -235,7 +236,7 @@ func execSExpireMember(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 		ss, ok := ds.(*store.SetStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a set")
+			return nil, errNotASet
 		}
 		ss.ExpireMember(p.Member, time.Duration(p.TTLNs))
 		return ss, nil
@@ -266,7 +267,7 @@ func execHGet(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 	})
 	if data == nil {
-		return nil, errors.New("not found")
+		return nil, ErrNotFound
 	}
 	return transport.Encode(transport.DataResponse{Data: data})
 }
@@ -282,7 +283,7 @@ func execHDel(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 		h, ok := ds.(*store.HashStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a hash")
+			return nil, errNotAHash
 		}
 		h.HDel(p.Field)
 		return h, nil
@@ -320,7 +321,7 @@ func execHExpireField(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 		h, ok := ds.(*store.HashStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a hash")
+			return nil, errNotAHash
 		}
 		h.ExpireField(p.Field, time.Duration(p.TTLNs))
 		return h, nil

@@ -13,6 +13,12 @@ import (
 
 var errMuxClosed = errors.New("mux: connection closed")
 
+// ErrRejected is returned by Client.Send when the remote handler rejected the
+// request. It is distinct from a network/connection failure.
+type ErrRejected struct{ msg string }
+
+func (e *ErrRejected) Error() string { return e.msg }
+
 // mux multiplexes concurrent request/response pairs over a single TCP connection.
 // One readLoop goroutine reads all inbound frames and dispatches each response
 // to the goroutine that sent the matching request.
@@ -58,7 +64,7 @@ func (m *mux) send(frame Frame) (Frame, error) {
 	select {
 	case resp := <-ch:
 		if resp.Err != "" {
-			return resp, errors.New(resp.Err)
+			return resp, &ErrRejected{msg: resp.Err}
 		}
 		return resp, nil
 	case <-m.done:
