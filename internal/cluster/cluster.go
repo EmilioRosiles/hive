@@ -71,7 +71,6 @@ func NewManager(cfg Config) (*Manager, error) {
 
 	m.ring.Add(cfg.NodeID, vNodeCount)
 	m.rebalancer = newRebalancer(cfg.RebalanceDebounce, m)
-	m.rebalancer.lastRing = r.Copy()
 
 	if cfg.Clustered {
 		addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.BindPort)
@@ -88,6 +87,8 @@ func NewManager(cfg Config) (*Manager, error) {
 
 		go m.startGossip()
 	}
+
+	m.rebalancer.lastRing = m.ring.Copy()
 
 	slog.Info("hive: node started", "node", cfg.NodeID, "clustered", cfg.Clustered)
 	return m, nil
