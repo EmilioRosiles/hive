@@ -34,9 +34,20 @@ func New(replicas int) *Ring {
 }
 
 // Add inserts a node into the ring with the given virtual node count.
+// Safe to call on an already-present node — existing vNodes are replaced.
 func (r *Ring) Add(nodeID string, count int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if _, exists := r.nodes[nodeID]; exists {
+		filtered := r.vNodes[:0]
+		for _, v := range r.vNodes {
+			if v.nodeID != nodeID {
+				filtered = append(filtered, v)
+			}
+		}
+		r.vNodes = filtered
+	}
 
 	r.nodes[nodeID] = count
 	for i := range count {
