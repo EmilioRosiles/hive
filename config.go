@@ -1,6 +1,10 @@
 package hive
 
-import "time"
+import (
+	"time"
+
+	"github.com/EmilioRosiles/hive/internal/sys"
+)
 
 // Mode controls how the node participates in the cluster.
 type Mode int
@@ -41,10 +45,11 @@ type Config struct {
 	// of each key. Must be <= cluster size. Defaults to 1.
 	ReplicationFactor int
 
-	// VNodes is the number of virtual nodes per physical node on the
-	// hash ring. Higher values improve key distribution.
-	// Defaults to 100.
-	VNodes int
+	// MemLimit is the maximum memory this node intends to use, in bytes.
+	// It is used to compute the node's virtual node count on the hash ring:
+	// nodes with more memory receive proportionally more keyspace.
+	// A value of 0 uses the default of 100 virtual nodes.
+	MemLimit uint64
 
 	// GossipInterval is how often this node sends heartbeats to peers.
 	// Defaults to 1s.
@@ -71,7 +76,7 @@ func defaultConfig() Config {
 		BindAddr:          "0.0.0.0",
 		BindPort:          7946,
 		ReplicationFactor: 1,
-		VNodes:            100,
+		MemLimit:          sys.TotalMemory(),
 		GossipInterval:    3 * time.Second,
 		GossipFanout:      3,
 		RebalanceDebounce: 500 * time.Millisecond,
@@ -93,9 +98,6 @@ func (c *Config) applyDefaults() {
 	if c.ReplicationFactor == 0 {
 		c.ReplicationFactor = d.ReplicationFactor
 	}
-	if c.VNodes == 0 {
-		c.VNodes = d.VNodes
-	}
 	if c.GossipInterval == 0 {
 		c.GossipInterval = d.GossipInterval
 	}
@@ -107,5 +109,8 @@ func (c *Config) applyDefaults() {
 	}
 	if c.DeadTimeout == 0 {
 		c.DeadTimeout = d.DeadTimeout
+	}
+	if c.MemLimit == 0 {
+		c.MemLimit = d.MemLimit
 	}
 }

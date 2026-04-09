@@ -29,6 +29,7 @@ type PeerState struct {
 	Alive             bool
 	LastSeen          time.Time
 	ReplicationFactor int
+	MemLimit          uint64
 }
 
 type HeartbeatRequest struct {

@@ -27,7 +27,7 @@ func (m *Manager) startGossip() {
 		targets := m.randomAlivePeers(m.cfg.GossipFanout)
 		m.heartbeat(targets...)
 		m.evictDeadPeers()
-		go m.rebalance.schedule()
+		go m.rebalancer.schedule()
 	}
 }
 
@@ -171,6 +171,7 @@ func (m *Manager) buildHeartbeatRequest() transport.HeartbeatRequest {
 		Alive:             true,
 		LastSeen:          time.Now(),
 		ReplicationFactor: m.cfg.ReplicationFactor,
+		MemLimit:          m.cfg.MemLimit,
 	})
 
 	for _, p := range m.peers {
@@ -180,6 +181,7 @@ func (m *Manager) buildHeartbeatRequest() transport.HeartbeatRequest {
 			Alive:             p.Alive,
 			LastSeen:          p.LastSeen,
 			ReplicationFactor: p.ReplicationFactor,
+			MemLimit:          p.MemLimit,
 		})
 	}
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"maps"
 	"sort"
 	"strconv"
 	"sync"
@@ -19,28 +20,27 @@ type vNode struct {
 
 // Ring is a thread-safe consistent hash ring.
 type Ring struct {
-	mu         sync.RWMutex
-	vNodeCount int
-	Replicas   int
-	vNodes     []vNode
+	mu       sync.RWMutex
+	Replicas int
+	nodes    map[string]int // nodeID -> vNodeCount
+	vNodes   []vNode
 }
 
-func New(vNodeCount int, replicas int) *Ring {
+func New(replicas int) *Ring {
 	return &Ring{
-		vNodeCount: vNodeCount,
-		Replicas:   replicas,
+		Replicas: replicas,
+		nodes:    make(map[string]int),
 	}
 }
 
-// Add inserts one or more nodes into the ring.
-func (r *Ring) Add(nodeIDs ...string) {
+// Add inserts a node into the ring with the given virtual node count.
+func (r *Ring) Add(nodeID string, count int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for _, node := range nodeIDs {
-		for i := 0; i < r.vNodeCount; i++ {
-			r.vNodes = append(r.vNodes, vNode{hash: hashKey(strconv.Itoa(i) + node), nodeID: node})
-		}
+	r.nodes[nodeID] = count
+	for i := range count {
+		r.vNodes = append(r.vNodes, vNode{hash: hashKey(strconv.Itoa(i) + nodeID), nodeID: nodeID})
 	}
 	sort.Slice(r.vNodes, func(i, j int) bool { return r.vNodes[i].hash < r.vNodes[j].hash })
 }
@@ -50,6 +50,7 @@ func (r *Ring) Remove(nodeID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	delete(r.nodes, nodeID)
 	newVNodes := make([]vNode, 0, len(r.vNodes))
 	for _, v := range r.vNodes {
 		if v.nodeID != nodeID {
@@ -81,7 +82,7 @@ func (r *Ring) Get(key string) []string {
 	seen := make(map[string]struct{})
 
 	i := idx
-	for len(uniqueNodes) < r.Replicas+1 && len(seen) < len(r.vNodes)/r.vNodeCount {
+	for len(uniqueNodes) < r.Replicas+1 && len(seen) < len(r.nodes) {
 		v := r.vNodes[i]
 		if _, exists := seen[v.nodeID]; !exists {
 			seen[v.nodeID] = struct{}{}
@@ -101,21 +102,10 @@ func (r *Ring) GetNodes() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if len(r.vNodes) == 0 {
-		return []string{}
+	uniqueNodes := make([]string, 0, len(r.nodes))
+	for nodeID := range r.nodes {
+		uniqueNodes = append(uniqueNodes, nodeID)
 	}
-
-	nodeCount := len(r.vNodes) / r.vNodeCount
-	uniqueNodes := make([]string, 0, nodeCount)
-	seen := make(map[string]struct{}, nodeCount)
-
-	for _, v := range r.vNodes {
-		if _, exists := seen[v.nodeID]; !exists {
-			seen[v.nodeID] = struct{}{}
-			uniqueNodes = append(uniqueNodes, v.nodeID)
-		}
-	}
-
 	return uniqueNodes
 }
 
@@ -153,10 +143,12 @@ func (r *Ring) Copy() *Ring {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	nodes := make(map[string]int, len(r.nodes))
+	maps.Copy(nodes, r.nodes)
 	c := &Ring{
-		vNodeCount: r.vNodeCount,
-		Replicas:   r.Replicas,
-		vNodes:     make([]vNode, len(r.vNodes)),
+		Replicas: r.Replicas,
+		nodes:    nodes,
+		vNodes:   make([]vNode, len(r.vNodes)),
 	}
 	copy(c.vNodes, r.vNodes)
 	return c

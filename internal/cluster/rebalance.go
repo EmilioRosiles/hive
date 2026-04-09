@@ -11,7 +11,7 @@ import (
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
-type rebalanceManager struct {
+type rebalancer struct {
 	mu       sync.Mutex
 	timer    *time.Timer
 	debounce time.Duration
@@ -19,12 +19,12 @@ type rebalanceManager struct {
 	mgr      *Manager
 }
 
-func newRebalanceManager(debounce time.Duration, mgr *Manager) *rebalanceManager {
-	return &rebalanceManager{debounce: debounce, mgr: mgr}
+func newRebalancer(debounce time.Duration, mgr *Manager) *rebalancer {
+	return &rebalancer{debounce: debounce, mgr: mgr}
 }
 
 // schedule debounces rebalance runs so rapid membership changes don't cause cascading migrations.
-func (rm *rebalanceManager) schedule() {
+func (rm *rebalancer) schedule() {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	if rm.timer != nil {
@@ -33,7 +33,7 @@ func (rm *rebalanceManager) schedule() {
 	rm.timer = time.AfterFunc(rm.debounce, rm.run)
 }
 
-func (rm *rebalanceManager) run() {
+func (rm *rebalancer) run() {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 

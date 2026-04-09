@@ -21,7 +21,7 @@ type Config struct {
 	BindPort          int
 	Seeds             []string
 	ReplicationFactor int
-	VNodes            int
+	MemLimit          uint64
 	GossipInterval    time.Duration
 	GossipFanout      int
 	RebalanceDebounce time.Duration
@@ -37,26 +37,28 @@ type PeerInfo struct {
 	Alive             bool
 	LastSeen          time.Time
 	ReplicationFactor int
+	MemLimit          uint64
 }
 
 // Manager owns the cluster state for this node.
 type Manager struct {
-	mu        sync.RWMutex
-	cfg       Config
-	ring      *ring.Ring
-	store     *store.DataStore
-	peers     map[string]*PeerInfo
-	clients   map[string]*transport.Client
-	rebalance *rebalanceManager
-	server    *transport.Server
-	stopCh    chan struct{}
+	mu         sync.RWMutex
+	cfg        Config
+	ring       *ring.Ring
+	store      *store.DataStore
+	peers      map[string]*PeerInfo
+	clients    map[string]*transport.Client
+	rebalancer *rebalancer
+	server     *transport.Server
+	stopCh     chan struct{}
 }
 
 // NewManager creates and starts a cluster Manager.
 // In clustered mode it binds a TCP server and contacts Seeds to join.
 func NewManager(cfg Config) (*Manager, error) {
-	r := ring.New(cfg.VNodes, cfg.ReplicationFactor)
+	r := ring.New(cfg.ReplicationFactor)
 	ds := store.NewDataStore(30 * time.Second)
+	vNodeCount := computeVNodes(cfg.MemLimit)
 
 	m := &Manager{
 		cfg:     cfg,
@@ -67,9 +69,9 @@ func NewManager(cfg Config) (*Manager, error) {
 		stopCh:  make(chan struct{}),
 	}
 
-	m.ring.Add(cfg.NodeID)
-	m.rebalance = newRebalanceManager(cfg.RebalanceDebounce, m)
-	m.rebalance.lastRing = r.Copy()
+	m.ring.Add(cfg.NodeID, vNodeCount)
+	m.rebalancer = newRebalancer(cfg.RebalanceDebounce, m)
+	m.rebalancer.lastRing = r.Copy()
 
 	if cfg.Clustered {
 		addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.BindPort)
@@ -125,6 +127,7 @@ func (m *Manager) addPeer(ps transport.PeerState) error {
 		return fmt.Errorf("replication factor mismatch: local=%d peer=%d (addr=%s) — all nodes must be configured with the same ReplicationFactor",
 			m.cfg.ReplicationFactor, ps.ReplicationFactor, ps.Addr)
 	}
+	vNodeCount := computeVNodes(ps.MemLimit)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -133,9 +136,9 @@ func (m *Manager) addPeer(ps transport.PeerState) error {
 		if !p.Alive {
 			p.Alive = true
 			p.LastSeen = time.Now()
-			m.ring.Add(ps.NodeID)
+			m.ring.Add(ps.NodeID, vNodeCount)
 			m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
-			go m.rebalance.schedule()
+			go m.rebalancer.schedule()
 		}
 		return nil
 	}
@@ -146,10 +149,11 @@ func (m *Manager) addPeer(ps transport.PeerState) error {
 		Alive:             true,
 		LastSeen:          time.Now(),
 		ReplicationFactor: ps.ReplicationFactor,
+		MemLimit:          ps.MemLimit,
 	}
-	m.ring.Add(ps.NodeID)
+	m.ring.Add(ps.NodeID, vNodeCount)
 	m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
-	go m.rebalance.schedule()
+	go m.rebalancer.schedule()
 
 	slog.Info("cluster: added peer", "nodeID", ps.NodeID, "addr", ps.Addr)
 	return nil
@@ -184,7 +188,7 @@ func (m *Manager) evictPeer(nodeID string) {
 	}
 	delete(m.peers, nodeID)
 	m.ring.Remove(nodeID)
-	go m.rebalance.schedule()
+	go m.rebalancer.schedule()
 
 	slog.Warn("cluster: peer evicted", "addr", p.Addr)
 }
@@ -226,4 +230,17 @@ func (m *Manager) randomAlivePeers(n int) []*PeerInfo {
 // responsibleNodes returns the node IDs responsible for a key.
 func (m *Manager) responsibleNodes(key string) []string {
 	return m.ring.Get(key)
+}
+
+// vNode count constants for weighted consistent hashing.
+const (
+	vNodesPerUnit = 100       // virtual nodes per unitSize of memory
+	unitSize      = 256 << 20 // 256 MiB
+	defaultVNodes = 100
+)
+
+// computeVNodes derives the virtual node count from a memory limit in bytes.
+// A node with no MemLimit gets defaultVNodes, preserving previous behaviour.
+func computeVNodes(memLimit uint64) int {
+	return max(defaultVNodes, int(memLimit/unitSize)*vNodesPerUnit)
 }
