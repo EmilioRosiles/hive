@@ -108,7 +108,7 @@ type wireHashField struct {
 
 type wireHash struct {
 	Fields    map[string]wireHashField `msgpack:"f"`
-	ExpiresAt int64                   `msgpack:"e"`
+	ExpiresAt int64                    `msgpack:"e"`
 }
 
 func (h *HashStructure) Encode() ([]byte, error) {

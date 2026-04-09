@@ -55,7 +55,7 @@ func NewNode(cfg Config) (*Node, error) {
 		BindPort:          cfg.BindPort,
 		Seeds:             cfg.Seeds,
 		ReplicationFactor: cfg.ReplicationFactor,
-		VNodes:            cfg.VNodes,
+		MemLimit:          cfg.MemLimit,
 		GossipInterval:    cfg.GossipInterval,
 		GossipFanout:      cfg.GossipFanout,
 		RebalanceDebounce: cfg.RebalanceDebounce,
@@ -79,7 +79,7 @@ func (n *Node) Shutdown() error {
 func (n *Node) Status() ClusterStatus {
 	peers := n.cluster.Peers()
 	return ClusterStatus{
-		NodeID: n.cfg.NodeID,
+		Config: n.cfg,
 		Peers:  peers,
 		Size:   len(peers) + 1,
 	}
@@ -87,9 +87,9 @@ func (n *Node) Status() ClusterStatus {
 
 // ClusterStatus is a point-in-time snapshot of cluster membership.
 type ClusterStatus struct {
-	NodeID string
-	Peers  []cluster.PeerInfo
-	Size   int
+	Config
+	Peers []cluster.PeerInfo
+	Size  int
 }
 
 func randomID() (string, error) {
@@ -99,4 +99,3 @@ func randomID() (string, error) {
 	}
 	return fmt.Sprintf("%x", b), nil
 }
-

@@ -8,14 +8,14 @@ type MsgType uint8
 
 const (
 	MsgHeartbeat MsgType = iota + 1 // gossip state sync
-	MsgForward                       // route a command to the responsible node
-	MsgRebalance                     // bulk key migration during rebalance
-	MsgLeave                         // graceful departure announcement
+	MsgForward                      // route a command to the responsible node
+	MsgRebalance                    // bulk key migration during rebalance
+	MsgLeave                        // graceful departure announcement
 )
 
 // Frame is the envelope wrapping every message on the wire.
 type Frame struct {
-	ID      uint32  // request ID used to match responses on a multiplexed connection
+	ID      uint32 // request ID used to match responses on a multiplexed connection
 	Type    MsgType
 	Payload []byte // msgpack-encoded message body
 	Err     string // non-empty if the handler returned an error
@@ -24,10 +24,12 @@ type Frame struct {
 // -- Heartbeat --
 
 type PeerState struct {
-	NodeID   string
-	Addr     string
-	Alive    bool
-	LastSeen time.Time
+	NodeID            string
+	Addr              string
+	Alive             bool
+	LastSeen          time.Time
+	ReplicationFactor int
+	MemLimit          uint64
 }
 
 type HeartbeatRequest struct {
@@ -143,7 +145,7 @@ type IntResponse struct{ Value int }
 // RebalanceEntry is a single key migrated to a new owner node.
 type RebalanceEntry struct {
 	Key  string
-	Kind uint8  // store.Kind value
+	Kind uint8 // store.Kind value
 	Data []byte
 	TTL  int64 // nanoseconds until expiry from time of send; 0 means no TTL
 }

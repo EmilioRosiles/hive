@@ -1,8 +1,8 @@
 package cluster
 
 import (
-	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/store"
@@ -58,7 +58,9 @@ func (m *Manager) handleHeartbeat(payload []byte) ([]byte, error) {
 	if err := transport.Decode(payload, &req); err != nil {
 		return nil, fmt.Errorf("handler: decode heartbeat: %w", err)
 	}
-	m.mergeState(req.Peers)
+	if err := m.mergeState(req.Peers); err != nil {
+		return nil, err
+	}
 	resp := transport.HeartbeatResponse{Peers: m.buildHeartbeatRequest().Peers}
 	return transport.Encode(resp)
 }
@@ -87,37 +89,21 @@ func (m *Manager) handleRebalance(payload []byte) ([]byte, error) {
 	if err := transport.Decode(payload, &batch); err != nil {
 		return nil, fmt.Errorf("handler: decode rebalance: %w", err)
 	}
-	now := time.Now()
+	received := time.Now()
 	for _, re := range batch.Entries {
-		ttl := time.Duration(re.TTL) - time.Since(now)
-		switch store.Kind(re.Kind) {
-		case store.KindValue:
-			var e *store.ValueStructure
-			if re.TTL > 0 {
-				e = store.NewValueStructureWithTTL(re.Data, ttl)
-			} else {
-				e = store.NewValueStructure(re.Data)
-			}
-			m.store.Set(re.Key, e)
-		case store.KindSet:
-			ss, err := store.DecodeSetStructure(re.Data)
-			if err != nil {
-				continue
-			}
-			if re.TTL > 0 {
-				ss.SetKeyExpiry(now.Add(ttl).Unix())
-			}
-			m.store.Set(re.Key, ss)
-		case store.KindHash:
-			hs, err := store.DecodeHashStructure(re.Data)
-			if err != nil {
-				continue
-			}
-			if re.TTL > 0 {
-				hs.SetKeyExpiry(now.Add(ttl).Unix())
-			}
-			m.store.Set(re.Key, hs)
+		entry, err := m.store.DecodeEntry(store.Kind(re.Kind), re.Data)
+		if err != nil {
+			slog.Warn("rebalance: decode entry failed", "key", re.Key, "err", err)
+			continue
 		}
+		if re.TTL > 0 {
+			remaining := time.Duration(re.TTL) - time.Since(received)
+			if remaining <= 0 {
+				continue // expired in transit
+			}
+			entry.SetKeyExpiry(received.Add(remaining).Unix())
+		}
+		m.store.Set(re.Key, entry)
 	}
 	return nil, nil
 }
@@ -162,11 +148,11 @@ func execValueSet(m *Manager, key string, payload []byte) ([]byte, error) {
 func execValueGet(m *Manager, key string, _ []byte) ([]byte, error) {
 	e, ok := m.store.Get(key)
 	if !ok {
-		return nil, errors.New("not found")
+		return nil, ErrNotFound
 	}
 	v, ok := e.(*store.ValueStructure)
 	if !ok {
-		return nil, errors.New("type mismatch")
+		return nil, errTypeMismatch
 	}
 	resp, err := transport.Encode(transport.DataResponse{Data: v.Data})
 	if err != nil {
@@ -198,7 +184,7 @@ func execSRem(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 		ss, ok := ds.(*store.SetStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a set")
+			return nil, errNotASet
 		}
 		ss.Remove(p.Member)
 		return ss, nil
@@ -250,7 +236,7 @@ func execSExpireMember(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 		ss, ok := ds.(*store.SetStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a set")
+			return nil, errNotASet
 		}
 		ss.ExpireMember(p.Member, time.Duration(p.TTLNs))
 		return ss, nil
@@ -281,7 +267,7 @@ func execHGet(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 	})
 	if data == nil {
-		return nil, errors.New("not found")
+		return nil, ErrNotFound
 	}
 	return transport.Encode(transport.DataResponse{Data: data})
 }
@@ -297,7 +283,7 @@ func execHDel(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 		h, ok := ds.(*store.HashStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a hash")
+			return nil, errNotAHash
 		}
 		h.HDel(p.Field)
 		return h, nil
@@ -335,7 +321,7 @@ func execHExpireField(m *Manager, key string, payload []byte) ([]byte, error) {
 		}
 		h, ok := ds.(*store.HashStructure)
 		if !ok {
-			return nil, errors.New("type mismatch: not a hash")
+			return nil, errNotAHash
 		}
 		h.ExpireField(p.Field, time.Duration(p.TTLNs))
 		return h, nil
