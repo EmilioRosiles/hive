@@ -72,7 +72,7 @@ func (r *Ring) Remove(nodeID string) {
 }
 
 // Get returns the node IDs responsible for key. The first ID is the primary owner.
-// Returns up to Replicas+1 unique node IDs.
+// Returns up to Replicas unique node IDs.
 func (r *Ring) Get(key string) []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -89,11 +89,11 @@ func (r *Ring) Get(key string) []string {
 		idx = 0
 	}
 
-	uniqueNodes := make([]string, 0, r.Replicas+1)
+	uniqueNodes := make([]string, 0, r.Replicas)
 	seen := make(map[string]struct{})
 
 	i := idx
-	for len(uniqueNodes) < r.Replicas+1 && len(seen) < len(r.nodes) {
+	for len(uniqueNodes) < r.Replicas && len(seen) < len(r.nodes) {
 		v := r.vNodes[i]
 		if _, exists := seen[v.nodeID]; !exists {
 			seen[v.nodeID] = struct{}{}
