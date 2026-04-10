@@ -74,71 +74,19 @@ const (
 )
 
 // ForwardRequest asks the receiving node to execute an operation locally.
-// Payload is a msgpack-encoded op-specific struct.
+// Args are positional raw byte slots — no intermediate struct encoding.
 type ForwardRequest struct {
-	Op      Op
-	Key     string
-	Payload []byte
+	Op   Op
+	Key  string
+	Args [][]byte
 }
 
 // ForwardResponse carries the result of a forwarded operation.
-// Payload is a msgpack-encoded op-specific response struct.
+// Results are positional raw byte slots matching the op's return layout.
+// Write ops return nil. Read ops return one or more slots.
 type ForwardResponse struct {
-	Payload []byte
+	Results [][]byte
 }
-
-// -- Shared op payloads --
-
-type ExpirePayload struct{ TTLNs int64 }
-
-// -- Value op payloads / responses --
-
-type ValueSetPayload struct{ Data []byte }
-
-type DataResponse struct{ Data []byte }
-
-// -- Set op payloads / responses --
-
-type SAddPayload struct {
-	Member string
-	TTLNs  int64 // 0 = no expiry
-}
-
-type SRemPayload struct{ Member string }
-
-type SIsMemberPayload struct{ Member string }
-
-type SExpireMemberPayload struct {
-	Member string
-	TTLNs  int64
-}
-
-// -- Hash op payloads / responses --
-
-type HSetPayload struct {
-	Field string
-	Data  []byte
-	TTLNs int64 // 0 = no expiry
-}
-
-type HGetPayload struct{ Field string }
-
-type HDelPayload struct{ Field string }
-
-type HExpireFieldPayload struct {
-	Field string
-	TTLNs int64
-}
-
-type MapResponse struct{ Values map[string][]byte }
-
-// -- Generic response types --
-
-type BoolResponse struct{ Value bool }
-
-type StringsResponse struct{ Values []string }
-
-type IntResponse struct{ Value int }
 
 // -- Rebalance --
 

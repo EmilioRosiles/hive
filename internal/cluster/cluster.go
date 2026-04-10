@@ -40,8 +40,8 @@ type PeerInfo struct {
 	MemLimit          uint64
 }
 
-// Manager owns the cluster state for this node.
-type Manager struct {
+// Cluster owns the cluster state for this node.
+type Cluster struct {
 	mu         sync.RWMutex
 	cfg        Config
 	ring       *ring.Ring
@@ -51,16 +51,17 @@ type Manager struct {
 	rebalancer *rebalancer
 	server     *transport.Server
 	stopCh     chan struct{}
+	stopOnce   sync.Once
 }
 
-// NewManager creates and starts a cluster Manager.
+// NewCluster creates and starts a cluster Cluster.
 // In clustered mode it binds a TCP server and contacts Seeds to join.
-func NewManager(cfg Config) (*Manager, error) {
+func NewCluster(cfg Config) (*Cluster, error) {
 	r := ring.New(cfg.ReplicationFactor)
 	ds := store.NewDataStore(30 * time.Second)
 	vNodeCount := computeVNodes(cfg.MemLimit)
 
-	m := &Manager{
+	m := &Cluster{
 		cfg:     cfg,
 		ring:    r,
 		store:   ds,
@@ -94,20 +95,22 @@ func NewManager(cfg Config) (*Manager, error) {
 	return m, nil
 }
 
-// Shutdown gracefully stops the node.
-func (m *Manager) Shutdown() error {
-	close(m.stopCh)
-	m.store.Stop()
-
-	if m.server != nil {
-		m.announceLeave()
-		return m.server.Close()
-	}
-	return nil
+// Shutdown gracefully stops the node. Safe to call more than once.
+func (m *Cluster) Shutdown() error {
+	var err error
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+		m.store.Stop()
+		if m.server != nil {
+			m.announceLeave()
+			err = m.server.Close()
+		}
+	})
+	return err
 }
 
 // Peers returns a snapshot of all known peers.
-func (m *Manager) Peers() []PeerInfo {
+func (m *Cluster) Peers() []PeerInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -123,7 +126,7 @@ func (m *Manager) Peers() []PeerInfo {
 // No-op if the peer is already known and alive.
 // ps must have a non-empty NodeID — bootstrap ensures this before any peer
 // is inserted into the ring.
-func (m *Manager) addPeer(ps transport.PeerState) error {
+func (m *Cluster) addPeer(ps transport.PeerState) error {
 	if ps.ReplicationFactor != 0 && ps.ReplicationFactor != m.cfg.ReplicationFactor {
 		return fmt.Errorf("replication factor mismatch: local=%d peer=%d (addr=%s) — all nodes must be configured with the same ReplicationFactor",
 			m.cfg.ReplicationFactor, ps.ReplicationFactor, ps.Addr)
@@ -162,7 +165,7 @@ func (m *Manager) addPeer(ps transport.PeerState) error {
 
 // markDead flags a peer as unreachable and drops its client connection,
 // but leaves it in the ring until DeadTimeout elapses.
-func (m *Manager) markDead(nodeID string) {
+func (m *Cluster) markDead(nodeID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -179,7 +182,7 @@ func (m *Manager) markDead(nodeID string) {
 
 // evictPeer removes a peer from the ring and triggers rebalance.
 // Called only after DeadTimeout has elapsed since the peer was marked dead.
-func (m *Manager) evictPeer(nodeID string) {
+func (m *Cluster) evictPeer(nodeID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -195,7 +198,7 @@ func (m *Manager) evictPeer(nodeID string) {
 }
 
 // getPeer returns a peer by node ID.
-func (m *Manager) getPeer(nodeID string) (*PeerInfo, bool) {
+func (m *Cluster) getPeer(nodeID string) (*PeerInfo, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	p, ok := m.peers[nodeID]
@@ -203,7 +206,7 @@ func (m *Manager) getPeer(nodeID string) (*PeerInfo, bool) {
 }
 
 // getClient returns the transport client for a peer node ID.
-func (m *Manager) getClient(nodeID string) (*transport.Client, bool) {
+func (m *Cluster) getClient(nodeID string) (*transport.Client, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	c, ok := m.clients[nodeID]
@@ -211,7 +214,7 @@ func (m *Manager) getClient(nodeID string) (*transport.Client, bool) {
 }
 
 // randomAlivePeers returns up to n randomly selected alive peers.
-func (m *Manager) randomAlivePeers(n int) []*PeerInfo {
+func (m *Cluster) randomAlivePeers(n int) []*PeerInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -229,7 +232,7 @@ func (m *Manager) randomAlivePeers(n int) []*PeerInfo {
 }
 
 // responsibleNodes returns the node IDs responsible for a key.
-func (m *Manager) responsibleNodes(key string) []string {
+func (m *Cluster) responsibleNodes(key string) []string {
 	return m.ring.Get(key)
 }
 

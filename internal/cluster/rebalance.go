@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -11,15 +12,41 @@ import (
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
+// handleRebalance receives a batch of keys migrated from another node and
+// applies them to the local store, adjusting TTLs for transit time.
+func (m *Cluster) handleRebalance(payload []byte) ([]byte, error) {
+	var batch transport.RebalanceBatch
+	if err := transport.Decode(payload, &batch); err != nil {
+		return nil, fmt.Errorf("handler: decode rebalance: %w", err)
+	}
+	received := time.Now()
+	for _, re := range batch.Entries {
+		entry, err := m.store.DecodeEntry(store.Kind(re.Kind), re.Data)
+		if err != nil {
+			slog.Warn("rebalance: decode entry failed", "key", re.Key, "err", err)
+			continue
+		}
+		if re.TTL > 0 {
+			remaining := time.Duration(re.TTL) - time.Since(received)
+			if remaining <= 0 {
+				continue // expired in transit
+			}
+			entry.SetKeyExpiry(received.Add(remaining).Unix())
+		}
+		m.store.Set(re.Key, entry)
+	}
+	return nil, nil
+}
+
 type rebalancer struct {
 	mu       sync.Mutex
 	timer    *time.Timer
 	debounce time.Duration
 	lastRing *ring.Ring
-	mgr      *Manager
+	mgr      *Cluster
 }
 
-func newRebalancer(debounce time.Duration, mgr *Manager) *rebalancer {
+func newRebalancer(debounce time.Duration, mgr *Cluster) *rebalancer {
 	return &rebalancer{debounce: debounce, mgr: mgr}
 }
 
@@ -101,7 +128,7 @@ func (rm *rebalancer) run() {
 	slog.Debug("rebalance: finished")
 }
 
-func (m *Manager) sendRebalanceBatch(nodeID string, entries []transport.RebalanceEntry) {
+func (m *Cluster) sendRebalanceBatch(nodeID string, entries []transport.RebalanceEntry) {
 	client, ok := m.getClient(nodeID)
 	if !ok {
 		slog.Warn("rebalance: no client", "node", nodeID)
@@ -143,7 +170,7 @@ func migrationTargets(oldOwners, newOwners []string) []string {
 
 // migrationLeader elects which node is responsible for pushing data to new owners.
 // Prefers the original primary, falling back through old replicas.
-func migrationLeader(oldOwners, newOwners []string, m *Manager) string {
+func migrationLeader(oldOwners, newOwners []string, m *Cluster) string {
 	for _, id := range oldOwners {
 		if id == m.cfg.NodeID {
 			return id

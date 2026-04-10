@@ -3,7 +3,6 @@ package store
 
 import (
 	"fmt"
-	"hash/fnv"
 	"runtime"
 	"sync"
 	"time"
@@ -84,10 +83,19 @@ func (ds *DataStore) DecodeEntry(kind Kind, data []byte) (DataStructure, error) 
 	return fn(data)
 }
 
+// fnv1a64 constants match the stdlib hash/fnv implementation.
+const (
+	fnvOffset64 uint64 = 14695981039346656037
+	fnvPrime64  uint64 = 1099511628211
+)
+
 func (ds *DataStore) getShard(key string) *shard {
-	h := fnv.New64a()
-	h.Write([]byte(key))
-	return ds.shards[h.Sum64()&(ds.shardsCount-1)]
+	h := fnvOffset64
+	for i := range len(key) {
+		h ^= uint64(key[i])
+		h *= fnvPrime64
+	}
+	return ds.shards[h&(ds.shardsCount-1)]
 }
 
 func (ds *DataStore) Get(key string) (DataStructure, bool) {
@@ -99,7 +107,7 @@ func (ds *DataStore) Get(key string) (DataStructure, bool) {
 	if !ok {
 		return nil, false
 	}
-	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() > exp {
+	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() >= exp {
 		return nil, false
 	}
 	return e, true
@@ -146,7 +154,7 @@ func (ds *DataStore) Read(key string, fn func(DataStructure)) {
 	if !ok {
 		return
 	}
-	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() > exp {
+	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() >= exp {
 		return
 	}
 	fn(e)
@@ -188,7 +196,7 @@ func (ds *DataStore) Scan(cursor, count int, fn func(key string, e DataStructure
 		s := ds.shards[i]
 		s.mu.RLock()
 		for key, e := range s.data {
-			if exp := e.KeyExpiry(); exp != 0 && now > exp {
+			if exp := e.KeyExpiry(); exp != 0 && now >= exp {
 				continue
 			}
 			fn(key, e)
@@ -247,7 +255,7 @@ func (ds *DataStore) deleteExpired() {
 		s.mu.Lock()
 		for key, e := range s.data {
 			// Phase 1: key-level TTL — always evicts the whole entry.
-			if exp := e.KeyExpiry(); exp != 0 && nowUnix > exp {
+			if exp := e.KeyExpiry(); exp != 0 && nowUnix >= exp {
 				delete(s.data, key)
 				continue
 			}

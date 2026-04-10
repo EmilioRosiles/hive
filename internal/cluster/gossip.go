@@ -11,8 +11,32 @@ import (
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
+// handleHeartbeat merges incoming peer state and returns this node's view.
+func (m *Cluster) handleHeartbeat(payload []byte) ([]byte, error) {
+	var req transport.HeartbeatRequest
+	if err := transport.Decode(payload, &req); err != nil {
+		return nil, fmt.Errorf("handler: decode heartbeat: %w", err)
+	}
+	if err := m.mergeState(req.Peers); err != nil {
+		return nil, err
+	}
+	resp := transport.HeartbeatResponse{Peers: m.buildHeartbeatRequest().Peers}
+	return transport.Encode(resp)
+}
+
+// handleLeave removes a peer that has announced a graceful departure.
+func (m *Cluster) handleLeave(payload []byte) error {
+	var req transport.LeaveRequest
+	if err := transport.Decode(payload, &req); err != nil {
+		return fmt.Errorf("handler: decode leave: %w", err)
+	}
+	m.markDead(req.NodeID)
+	m.evictPeer(req.NodeID)
+	return nil
+}
+
 // startGossip runs the heartbeat loop until the node shuts down.
-func (m *Manager) startGossip() {
+func (m *Cluster) startGossip() {
 	interval := m.cfg.GossipInterval
 	jitterRange := time.Duration(float64(interval) * 0.25)
 
@@ -32,7 +56,7 @@ func (m *Manager) startGossip() {
 }
 
 // evictDeadPeers removes peers that have been dead longer than DeadTimeout.
-func (m *Manager) evictDeadPeers() {
+func (m *Cluster) evictDeadPeers() {
 	m.mu.RLock()
 	var toEvict []string
 	for nodeID, p := range m.peers {
@@ -49,7 +73,7 @@ func (m *Manager) evictDeadPeers() {
 
 // heartbeat sends this node's view of the cluster to each target peer.
 // Peers that fail to respond are removed from the cluster.
-func (m *Manager) heartbeat(targets ...*PeerInfo) {
+func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 	if len(targets) == 0 {
 		return
 	}
@@ -92,7 +116,7 @@ func (m *Manager) heartbeat(targets ...*PeerInfo) {
 // real NodeIDs before the gossip loop begins. Unreachable seeds are skipped —
 // at least one must succeed for the node to join the cluster.
 // If the seed rejects the join (e.g. replication factor mismatch), the node halts.
-func (m *Manager) bootstrap(addr string) {
+func (m *Cluster) bootstrap(addr string) {
 	payload, err := transport.Encode(m.buildHeartbeatRequest())
 	if err != nil {
 		return
@@ -122,7 +146,7 @@ func (m *Manager) bootstrap(addr string) {
 
 // mergeState reconciles a peer's view of the cluster with our own.
 // Returns the first error encountered, e.g. a replication factor mismatch.
-func (m *Manager) mergeState(remote []transport.PeerState) error {
+func (m *Cluster) mergeState(remote []transport.PeerState) error {
 	for _, rs := range remote {
 		if rs.NodeID == "" || rs.NodeID == m.cfg.NodeID {
 			continue
@@ -158,7 +182,7 @@ func (m *Manager) mergeState(remote []transport.PeerState) error {
 }
 
 // buildHeartbeatRequest assembles the current node's peer list for gossip.
-func (m *Manager) buildHeartbeatRequest() transport.HeartbeatRequest {
+func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -189,7 +213,7 @@ func (m *Manager) buildHeartbeatRequest() transport.HeartbeatRequest {
 }
 
 // announceLeave notifies alive peers that this node is departing.
-func (m *Manager) announceLeave() {
+func (m *Cluster) announceLeave() {
 	payload, err := transport.Encode(transport.LeaveRequest{NodeID: m.cfg.NodeID})
 	if err != nil {
 		return

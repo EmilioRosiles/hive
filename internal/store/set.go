@@ -76,6 +76,7 @@ func (s *SetStructure) ExpireMember(member string, ttl time.Duration) {
 	}
 }
 
+
 // Cleanup removes expired members and reports whether the set is empty.
 // Called by the DataStore janitor while the shard write lock is held.
 func (s *SetStructure) Cleanup(now time.Time) bool {
