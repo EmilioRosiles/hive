@@ -141,7 +141,7 @@ func (m *Cluster) fanOutReplicas(req transport.ForwardRequest, nodes []string) {
 	for _, nodeID := range nodes {
 		go func() {
 			if nodeID == m.cfg.NodeID {
-				def.Exec(m, req.Key, req.Args) // local replica write
+				def.Exec(m, req.Key, req.Args)
 				return
 			}
 			if _, err := m.sendReq(nodeID, req); err != nil {

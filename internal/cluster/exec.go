@@ -198,16 +198,12 @@ func execHDel(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 }
 
 func execHGetAll(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
-	var result map[string][]byte
+	var out [][]byte
 	m.store.Read(key, func(ds store.DataStructure) {
 		if h, ok := ds.(*store.HashStructure); ok {
-			result = h.GetAll()
+			out = h.AppendAll(make([][]byte, 0, h.Len()*2))
 		}
 	})
-	out := make([][]byte, 0, len(result)*2)
-	for field, val := range result {
-		out = append(out, []byte(field), val)
-	}
 	return out, nil
 }
 

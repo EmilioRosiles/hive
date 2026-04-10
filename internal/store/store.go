@@ -3,7 +3,6 @@ package store
 
 import (
 	"fmt"
-	"hash/fnv"
 	"runtime"
 	"sync"
 	"time"
@@ -84,10 +83,19 @@ func (ds *DataStore) DecodeEntry(kind Kind, data []byte) (DataStructure, error) 
 	return fn(data)
 }
 
+// fnv1a64 constants match the stdlib hash/fnv implementation.
+const (
+	fnvOffset64 uint64 = 14695981039346656037
+	fnvPrime64  uint64 = 1099511628211
+)
+
 func (ds *DataStore) getShard(key string) *shard {
-	h := fnv.New64a()
-	h.Write([]byte(key))
-	return ds.shards[h.Sum64()&(ds.shardsCount-1)]
+	h := fnvOffset64
+	for i := range len(key) {
+		h ^= uint64(key[i])
+		h *= fnvPrime64
+	}
+	return ds.shards[h&(ds.shardsCount-1)]
 }
 
 func (ds *DataStore) Get(key string) (DataStructure, bool) {

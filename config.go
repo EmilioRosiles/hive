@@ -1,6 +1,7 @@
 package hive
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/sys"
@@ -68,6 +69,11 @@ type Config struct {
 	// marked dead and removed from the ring.
 	// Defaults to 10s.
 	DeadTimeout time.Duration
+
+	// LogLevel controls the verbosity of internal log output.
+	// nil defaults to slog.LevelError (quiet). Set explicitly to enable
+	// more verbose output, e.g. &slog.LevelInfo or &slog.LevelDebug.
+	LogLevel *slog.Level
 }
 
 func defaultConfig() Config {

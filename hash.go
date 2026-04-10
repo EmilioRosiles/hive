@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // HashStore is a typed key/field/value store backed by a Cache. Keys are namespaced
@@ -26,7 +27,7 @@ func NewHashStore[T any](cache *Cache, name string) *HashStore[T] {
 
 // HSet encodes value using msgpack and stores it under key/field.
 func (h *HashStore[T]) HSet(key, field string, value T) error {
-	data, err := encode(value)
+	data, err := msgpack.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("hive: %s.HSet %q %q: %w", h.prefix, key, field, err)
 	}
@@ -36,7 +37,7 @@ func (h *HashStore[T]) HSet(key, field string, value T) error {
 
 // HSetWithTTL encodes value and stores it under key/field with a per-field TTL.
 func (h *HashStore[T]) HSetWithTTL(key, field string, value T, ttl time.Duration) error {
-	data, err := encode(value)
+	data, err := msgpack.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("hive: %s.HSetWithTTL %q %q: %w", h.prefix, key, field, err)
 	}
@@ -52,8 +53,8 @@ func (h *HashStore[T]) HGet(key, field string) (T, error) {
 	if err != nil {
 		return zero, fmt.Errorf("hive: %s.HGet %q %q: %w", h.prefix, key, field, err)
 	}
-	value, err := decode[T](results[0])
-	if err != nil {
+	var value T
+	if err := msgpack.Unmarshal(results[0], &value); err != nil {
 		return zero, fmt.Errorf("hive: %s.HGet %q %q: decode: %w", h.prefix, key, field, err)
 	}
 	return value, nil
@@ -74,8 +75,8 @@ func (h *HashStore[T]) HGetAll(key string) (map[string]T, error) {
 	}
 	out := make(map[string]T, len(results)/2)
 	for i := 0; i+1 < len(results); i += 2 {
-		v, err := decode[T](results[i+1])
-		if err != nil {
+		var v T
+		if err := msgpack.Unmarshal(results[i+1], &v); err != nil {
 			return nil, fmt.Errorf("hive: %s.HGetAll %q: decode field %q: %w", h.prefix, key, string(results[i]), err)
 		}
 		out[string(results[i])] = v

@@ -67,13 +67,18 @@ func (h *HashStructure) Fields() []string {
 	return out
 }
 
-// GetAll returns all live field names and their data.
-func (h *HashStructure) GetAll() map[string][]byte {
+// Len returns the total number of fields (including expired ones not yet cleaned up).
+// Used to pre-size slices before AppendAll.
+func (h *HashStructure) Len() int { return len(h.fields) }
+
+// AppendAll appends live field name/value pairs to out as alternating
+// [field, value, field, value, ...] []byte slices and returns the result.
+// This avoids the intermediate map allocation that a GetAll() map return would require.
+func (h *HashStructure) AppendAll(out [][]byte) [][]byte {
 	now := time.Now().UnixNano()
-	out := make(map[string][]byte, len(h.fields))
 	for name, f := range h.fields {
 		if f.alive(now) {
-			out[name] = f.Data
+			out = append(out, []byte(name), f.Data)
 		}
 	}
 	return out

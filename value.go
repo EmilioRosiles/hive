@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // ValueStore is a typed key/value store backed by a Cache. Keys are namespaced
@@ -25,7 +26,7 @@ func NewValueStore[T any](cache *Cache, name string) *ValueStore[T] {
 
 // Set encodes value using msgpack and stores it under key.
 func (s *ValueStore[T]) Set(key string, value T) error {
-	data, err := encode(value)
+	data, err := msgpack.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("hive: %s.Set %q: %w", s.prefix, key, err)
 	}
@@ -41,8 +42,8 @@ func (s *ValueStore[T]) Get(key string) (T, error) {
 	if err != nil {
 		return zero, fmt.Errorf("hive: %s.Get %q: %w", s.prefix, key, err)
 	}
-	value, err := decode[T](results[0])
-	if err != nil {
+	var value T
+	if err := msgpack.Unmarshal(results[0], &value); err != nil {
 		return zero, fmt.Errorf("hive: %s.Get %q: decode: %w", s.prefix, key, err)
 	}
 	return value, nil

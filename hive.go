@@ -26,6 +26,8 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/cluster"
@@ -44,6 +46,11 @@ type Node struct {
 // In ModeStandalone the node operates as a local in-memory cache only.
 func NewNode(cfg Config) (*Node, error) {
 	cfg.applyDefaults()
+	logLevel := slog.LevelError
+	if cfg.LogLevel != nil {
+		logLevel = *cfg.LogLevel
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 
 	if cfg.NodeID == "" {
 		id, err := randomID()
