@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -10,6 +11,32 @@ import (
 	"github.com/EmilioRosiles/hive/internal/store"
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
+
+// handleRebalance receives a batch of keys migrated from another node and
+// applies them to the local store, adjusting TTLs for transit time.
+func (m *Manager) handleRebalance(payload []byte) ([]byte, error) {
+	var batch transport.RebalanceBatch
+	if err := transport.Decode(payload, &batch); err != nil {
+		return nil, fmt.Errorf("handler: decode rebalance: %w", err)
+	}
+	received := time.Now()
+	for _, re := range batch.Entries {
+		entry, err := m.store.DecodeEntry(store.Kind(re.Kind), re.Data)
+		if err != nil {
+			slog.Warn("rebalance: decode entry failed", "key", re.Key, "err", err)
+			continue
+		}
+		if re.TTL > 0 {
+			remaining := time.Duration(re.TTL) - time.Since(received)
+			if remaining <= 0 {
+				continue // expired in transit
+			}
+			entry.SetKeyExpiry(received.Add(remaining).Unix())
+		}
+		m.store.Set(re.Key, entry)
+	}
+	return nil, nil
+}
 
 type rebalancer struct {
 	mu       sync.Mutex

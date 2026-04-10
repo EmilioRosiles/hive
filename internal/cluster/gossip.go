@@ -11,6 +11,30 @@ import (
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
+// handleHeartbeat merges incoming peer state and returns this node's view.
+func (m *Manager) handleHeartbeat(payload []byte) ([]byte, error) {
+	var req transport.HeartbeatRequest
+	if err := transport.Decode(payload, &req); err != nil {
+		return nil, fmt.Errorf("handler: decode heartbeat: %w", err)
+	}
+	if err := m.mergeState(req.Peers); err != nil {
+		return nil, err
+	}
+	resp := transport.HeartbeatResponse{Peers: m.buildHeartbeatRequest().Peers}
+	return transport.Encode(resp)
+}
+
+// handleLeave removes a peer that has announced a graceful departure.
+func (m *Manager) handleLeave(payload []byte) error {
+	var req transport.LeaveRequest
+	if err := transport.Decode(payload, &req); err != nil {
+		return fmt.Errorf("handler: decode leave: %w", err)
+	}
+	m.markDead(req.NodeID)
+	m.evictPeer(req.NodeID)
+	return nil
+}
+
 // startGossip runs the heartbeat loop until the node shuts down.
 func (m *Manager) startGossip() {
 	interval := m.cfg.GossipInterval

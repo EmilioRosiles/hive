@@ -69,6 +69,13 @@ func NewNode(cfg Config) (*Node, error) {
 	return &Node{cfg: cfg, cluster: mgr}, nil
 }
 
+// Cache returns a handle to the cluster's data layer.
+// Pass it to store constructors (NewValueStore, NewSetStore, NewHashStore).
+// Multiple stores can share the same Cache.
+func (n *Node) Cache() *Cache {
+	return &Cache{cluster: n.cluster}
+}
+
 // Shutdown gracefully stops the node, announcing departure to peers before
 // closing all connections and stopping background workers.
 func (n *Node) Shutdown() error {
@@ -90,6 +97,12 @@ type ClusterStatus struct {
 	Config
 	Peers []cluster.PeerInfo
 	Size  int
+}
+
+// Cache is a handle to the cluster's data layer obtained from a Node.
+// It is the entry point for store constructors and cluster-wide operations.
+type Cache struct {
+	cluster *cluster.Manager
 }
 
 func randomID() (string, error) {

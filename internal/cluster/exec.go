@@ -1,124 +1,18 @@
 package cluster
 
 import (
-	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/store"
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
-// opFn is the signature for all op registry handlers.
-// It receives the manager, the target key, and the msgpack-encoded op payload.
-// It returns an optional msgpack-encoded response payload.
-type opFn func(m *Manager, key string, payload []byte) ([]byte, error)
+// This file contains the local execution functions for each cluster op.
+// Each function sits at the msgpack boundary: it decodes a raw payload,
+// applies the operation to the local store, and returns an optional encoded response.
+// No routing logic belongs here — by the time these are called, routing is done.
 
-// opRegistry maps each Op to its handler. Add new ops here — handleForward never changes.
-var opRegistry = map[transport.Op]opFn{
-	transport.OpDel:    execDel,
-	transport.OpExpire: execExpire,
-
-	transport.OpValueSet: execValueSet,
-	transport.OpValueGet: execValueGet,
-
-	transport.OpSAdd:          execSAdd,
-	transport.OpSRem:          execSRem,
-	transport.OpSIsMember:     execSIsMember,
-	transport.OpSMembers:      execSMembers,
-	transport.OpSCard:         execSCard,
-	transport.OpSExpireMember: execSExpireMember,
-
-	transport.OpHSet:         execHSet,
-	transport.OpHGet:         execHGet,
-	transport.OpHDel:         execHDel,
-	transport.OpHGetAll:      execHGetAll,
-	transport.OpHKeys:        execHKeys,
-	transport.OpHExpireField: execHExpireField,
-}
-
-// handleFrame is the transport.Handler registered with the TCP server.
-func (m *Manager) handleFrame(msgType transport.MsgType, payload []byte) ([]byte, error) {
-	switch msgType {
-	case transport.MsgHeartbeat:
-		return m.handleHeartbeat(payload)
-	case transport.MsgForward:
-		return m.handleForward(payload)
-	case transport.MsgRebalance:
-		return m.handleRebalance(payload)
-	case transport.MsgLeave:
-		return nil, m.handleLeave(payload)
-	default:
-		return nil, fmt.Errorf("handler: unknown message type %d", msgType)
-	}
-}
-
-func (m *Manager) handleHeartbeat(payload []byte) ([]byte, error) {
-	var req transport.HeartbeatRequest
-	if err := transport.Decode(payload, &req); err != nil {
-		return nil, fmt.Errorf("handler: decode heartbeat: %w", err)
-	}
-	if err := m.mergeState(req.Peers); err != nil {
-		return nil, err
-	}
-	resp := transport.HeartbeatResponse{Peers: m.buildHeartbeatRequest().Peers}
-	return transport.Encode(resp)
-}
-
-func (m *Manager) handleForward(payload []byte) ([]byte, error) {
-	var req transport.ForwardRequest
-	if err := transport.Decode(payload, &req); err != nil {
-		return nil, fmt.Errorf("handler: decode forward: %w", err)
-	}
-	fn, ok := opRegistry[req.Op]
-	if !ok {
-		return nil, fmt.Errorf("handler: unknown op %d", req.Op)
-	}
-	respPayload, err := fn(m, req.Key, req.Payload)
-	if err != nil {
-		return nil, err
-	}
-	if respPayload == nil {
-		return nil, nil
-	}
-	return transport.Encode(transport.ForwardResponse{Payload: respPayload})
-}
-
-func (m *Manager) handleRebalance(payload []byte) ([]byte, error) {
-	var batch transport.RebalanceBatch
-	if err := transport.Decode(payload, &batch); err != nil {
-		return nil, fmt.Errorf("handler: decode rebalance: %w", err)
-	}
-	received := time.Now()
-	for _, re := range batch.Entries {
-		entry, err := m.store.DecodeEntry(store.Kind(re.Kind), re.Data)
-		if err != nil {
-			slog.Warn("rebalance: decode entry failed", "key", re.Key, "err", err)
-			continue
-		}
-		if re.TTL > 0 {
-			remaining := time.Duration(re.TTL) - time.Since(received)
-			if remaining <= 0 {
-				continue // expired in transit
-			}
-			entry.SetKeyExpiry(received.Add(remaining).Unix())
-		}
-		m.store.Set(re.Key, entry)
-	}
-	return nil, nil
-}
-
-func (m *Manager) handleLeave(payload []byte) error {
-	var req transport.LeaveRequest
-	if err := transport.Decode(payload, &req); err != nil {
-		return fmt.Errorf("handler: decode leave: %w", err)
-	}
-	m.markDead(req.NodeID)
-	m.evictPeer(req.NodeID)
-	return nil
-}
-
-// -- shared op handlers --
+// -- shared ops --
 
 func execDel(m *Manager, key string, _ []byte) ([]byte, error) {
 	m.store.Del(key)
@@ -134,7 +28,7 @@ func execExpire(m *Manager, key string, payload []byte) ([]byte, error) {
 	return nil, nil
 }
 
-// -- value op handlers --
+// -- value ops --
 
 func execValueSet(m *Manager, key string, payload []byte) ([]byte, error) {
 	var p transport.ValueSetPayload
@@ -154,14 +48,10 @@ func execValueGet(m *Manager, key string, _ []byte) ([]byte, error) {
 	if !ok {
 		return nil, errTypeMismatch
 	}
-	resp, err := transport.Encode(transport.DataResponse{Data: v.Data})
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
+	return transport.Encode(transport.DataResponse{Data: v.Data})
 }
 
-// -- set op handlers --
+// -- set ops --
 
 func execSAdd(m *Manager, key string, payload []byte) ([]byte, error) {
 	var p transport.SAddPayload
@@ -243,7 +133,7 @@ func execSExpireMember(m *Manager, key string, payload []byte) ([]byte, error) {
 	})
 }
 
-// -- hash op handlers --
+// -- hash ops --
 
 func execHSet(m *Manager, key string, payload []byte) ([]byte, error) {
 	var p transport.HSetPayload
@@ -326,4 +216,46 @@ func execHExpireField(m *Manager, key string, payload []byte) ([]byte, error) {
 		h.ExpireField(p.Field, time.Duration(p.TTLNs))
 		return h, nil
 	})
+}
+
+// -- apply helpers --
+
+// applyHSet upserts field into a HashStructure, creating one if ds is nil.
+func applyHSet(ds store.DataStructure, field string, data []byte, ttl time.Duration) (store.DataStructure, error) {
+	var h *store.HashStructure
+	if ds == nil {
+		h = store.NewHashStructure()
+	} else {
+		var ok bool
+		h, ok = ds.(*store.HashStructure)
+		if !ok {
+			return nil, errNotAHash
+		}
+	}
+	if ttl > 0 {
+		h.HSetWithTTL(field, data, ttl)
+	} else {
+		h.HSet(field, data)
+	}
+	return h, nil
+}
+
+// applyAdd adds member to a SetStructure, creating one if ds is nil.
+func applyAdd(ds store.DataStructure, member string, ttl time.Duration) (store.DataStructure, error) {
+	var ss *store.SetStructure
+	if ds == nil {
+		ss = store.NewSetStructure()
+	} else {
+		var ok bool
+		ss, ok = ds.(*store.SetStructure)
+		if !ok {
+			return nil, errNotASet
+		}
+	}
+	if ttl > 0 {
+		ss.AddWithTTL(member, ttl)
+	} else {
+		ss.Add(member)
+	}
+	return ss, nil
 }
