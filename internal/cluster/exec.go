@@ -1,45 +1,72 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/store"
-	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
 // This file contains the local execution functions for each cluster op.
-// Each function sits at the msgpack boundary: it decodes a raw payload,
-// applies the operation to the local store, and returns an optional encoded response.
-// No routing logic belongs here — by the time these are called, routing is done.
+// Each function receives pre-decoded [][]byte arg slots and works directly
+// on the local store. No serialization happens here.
+// Arg slot positions are documented by the constants below.
+
+// -- arg index constants --
+
+const (
+	argExpireTTL = 0 // int64 ns big-endian
+)
+
+const (
+	argValueSetData = 0 // []byte
+)
+
+const (
+	argSAddMember = 0 // string
+	argSAddTTL    = 1 // int64 ns big-endian; absent = no expiry
+
+	argSRemMember = 0 // string
+
+	argSIsMemberMember = 0 // string
+
+	argSExpireMember = 0 // string
+	argSExpireTTL    = 1 // int64 ns big-endian
+)
+
+const (
+	argHSetField = 0 // string
+	argHSetData  = 1 // []byte
+	argHSetTTL   = 2 // int64 ns big-endian; absent = no expiry
+
+	argHGetField = 0 // string
+
+	argHDelField = 0 // string
+
+	argHExpireField    = 0 // string
+	argHExpireFieldTTL = 1 // int64 ns big-endian
+)
 
 // -- shared ops --
 
-func execDel(m *Manager, key string, _ []byte) ([]byte, error) {
+func execDel(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	m.store.Del(key)
 	return nil, nil
 }
 
-func execExpire(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.ExpirePayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
-	m.store.Expire(key, time.Duration(p.TTLNs))
+func execExpire(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	m.store.Expire(key, decodeTTL(args, argExpireTTL))
 	return nil, nil
 }
 
 // -- value ops --
 
-func execValueSet(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.ValueSetPayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
-	m.store.Set(key, store.NewValueStructure(p.Data))
+func execValueSet(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	m.store.Set(key, store.NewValueStructure(args[argValueSetData]))
 	return nil, nil
 }
 
-func execValueGet(m *Manager, key string, _ []byte) ([]byte, error) {
+func execValueGet(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	e, ok := m.store.Get(key)
 	if !ok {
 		return nil, ErrNotFound
@@ -48,26 +75,21 @@ func execValueGet(m *Manager, key string, _ []byte) ([]byte, error) {
 	if !ok {
 		return nil, errTypeMismatch
 	}
-	return transport.Encode(transport.DataResponse{Data: v.Data})
+	return [][]byte{v.Data}, nil
 }
 
 // -- set ops --
 
-func execSAdd(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.SAddPayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
+func execSAdd(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	member := string(args[argSAddMember])
+	ttl := decodeTTL(args, argSAddTTL)
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		return applyAdd(ds, p.Member, time.Duration(p.TTLNs))
+		return applyAdd(ds, member, ttl)
 	})
 }
 
-func execSRem(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.SRemPayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
+func execSRem(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	member := string(args[argSRemMember])
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
 		if ds == nil {
 			return nil, nil
@@ -76,50 +98,52 @@ func execSRem(m *Manager, key string, payload []byte) ([]byte, error) {
 		if !ok {
 			return nil, errNotASet
 		}
-		ss.Remove(p.Member)
+		ss.Remove(member)
 		return ss, nil
 	})
 }
 
-func execSIsMember(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.SIsMemberPayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
+func execSIsMember(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	member := string(args[argSIsMemberMember])
 	var result bool
 	m.store.Read(key, func(ds store.DataStructure) {
 		if ss, ok := ds.(*store.SetStructure); ok {
-			result = ss.IsMember(p.Member)
+			result = ss.IsMember(member)
 		}
 	})
-	return transport.Encode(transport.BoolResponse{Value: result})
+	if result {
+		return [][]byte{{1}}, nil
+	}
+	return [][]byte{{0}}, nil
 }
 
-func execSMembers(m *Manager, key string, _ []byte) ([]byte, error) {
+func execSMembers(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	var members []string
 	m.store.Read(key, func(ds store.DataStructure) {
 		if ss, ok := ds.(*store.SetStructure); ok {
 			members = ss.Members()
 		}
 	})
-	return transport.Encode(transport.StringsResponse{Values: members})
+	out := make([][]byte, len(members))
+	for i, m := range members {
+		out[i] = []byte(m)
+	}
+	return out, nil
 }
 
-func execSCard(m *Manager, key string, _ []byte) ([]byte, error) {
+func execSCard(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	var count int
 	m.store.Read(key, func(ds store.DataStructure) {
 		if ss, ok := ds.(*store.SetStructure); ok {
 			count = ss.Card()
 		}
 	})
-	return transport.Encode(transport.IntResponse{Value: count})
+	return [][]byte{encodeUint64(uint64(count))}, nil
 }
 
-func execSExpireMember(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.SExpireMemberPayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
+func execSExpireMember(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	member := string(args[argSExpireMember])
+	ttl := decodeTTL(args, argSExpireTTL)
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
 		if ds == nil {
 			return nil, nil
@@ -128,45 +152,38 @@ func execSExpireMember(m *Manager, key string, payload []byte) ([]byte, error) {
 		if !ok {
 			return nil, errNotASet
 		}
-		ss.ExpireMember(p.Member, time.Duration(p.TTLNs))
+		ss.ExpireMember(member, ttl)
 		return ss, nil
 	})
 }
 
 // -- hash ops --
 
-func execHSet(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.HSetPayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
+func execHSet(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	field := string(args[argHSetField])
+	data := args[argHSetData]
+	ttl := decodeTTL(args, argHSetTTL)
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		return applyHSet(ds, p.Field, p.Data, time.Duration(p.TTLNs))
+		return applyHSet(ds, field, data, ttl)
 	})
 }
 
-func execHGet(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.HGetPayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
+func execHGet(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	field := string(args[argHGetField])
 	var data []byte
 	m.store.Read(key, func(ds store.DataStructure) {
 		if h, ok := ds.(*store.HashStructure); ok {
-			data, _ = h.HGet(p.Field)
+			data, _ = h.HGet(field)
 		}
 	})
 	if data == nil {
 		return nil, ErrNotFound
 	}
-	return transport.Encode(transport.DataResponse{Data: data})
+	return [][]byte{data}, nil
 }
 
-func execHDel(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.HDelPayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
+func execHDel(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	field := string(args[argHDelField])
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
 		if ds == nil {
 			return nil, nil
@@ -175,36 +192,42 @@ func execHDel(m *Manager, key string, payload []byte) ([]byte, error) {
 		if !ok {
 			return nil, errNotAHash
 		}
-		h.HDel(p.Field)
+		h.HDel(field)
 		return h, nil
 	})
 }
 
-func execHGetAll(m *Manager, key string, _ []byte) ([]byte, error) {
+func execHGetAll(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	var result map[string][]byte
 	m.store.Read(key, func(ds store.DataStructure) {
 		if h, ok := ds.(*store.HashStructure); ok {
 			result = h.GetAll()
 		}
 	})
-	return transport.Encode(transport.MapResponse{Values: result})
+	out := make([][]byte, 0, len(result)*2)
+	for field, val := range result {
+		out = append(out, []byte(field), val)
+	}
+	return out, nil
 }
 
-func execHKeys(m *Manager, key string, _ []byte) ([]byte, error) {
+func execHKeys(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	var fields []string
 	m.store.Read(key, func(ds store.DataStructure) {
 		if h, ok := ds.(*store.HashStructure); ok {
 			fields = h.Fields()
 		}
 	})
-	return transport.Encode(transport.StringsResponse{Values: fields})
+	out := make([][]byte, len(fields))
+	for i, f := range fields {
+		out[i] = []byte(f)
+	}
+	return out, nil
 }
 
-func execHExpireField(m *Manager, key string, payload []byte) ([]byte, error) {
-	var p transport.HExpireFieldPayload
-	if err := transport.Decode(payload, &p); err != nil {
-		return nil, err
-	}
+func execHExpireField(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+	field := string(args[argHExpireField])
+	ttl := decodeTTL(args, argHExpireFieldTTL)
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
 		if ds == nil {
 			return nil, nil
@@ -213,7 +236,7 @@ func execHExpireField(m *Manager, key string, payload []byte) ([]byte, error) {
 		if !ok {
 			return nil, errNotAHash
 		}
-		h.ExpireField(p.Field, time.Duration(p.TTLNs))
+		h.ExpireField(field, ttl)
 		return h, nil
 	})
 }
@@ -258,4 +281,20 @@ func applyAdd(ds store.DataStructure, member string, ttl time.Duration) (store.D
 		ss.Add(member)
 	}
 	return ss, nil
+}
+
+// -- primitive encoding helpers --
+
+// decodeTTL reads an int64 nanosecond TTL from args[idx].
+// Returns 0 (no expiry) if the slot is absent or empty.
+func decodeTTL(args [][]byte, idx int) time.Duration {
+	if idx >= len(args) || len(args[idx]) == 0 {
+		return 0
+	}
+	return time.Duration(int64(binary.BigEndian.Uint64(args[idx])))
+}
+
+// encodeUint64 encodes n as an 8-byte big-endian slice.
+func encodeUint64(n uint64) []byte {
+	return binary.BigEndian.AppendUint64(nil, n)
 }

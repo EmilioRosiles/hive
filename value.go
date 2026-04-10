@@ -3,15 +3,15 @@ package hive
 import (
 	"fmt"
 	"time"
+
+	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
-// ValueStore is a typed key/value store backed by a Node. Keys are namespaced
+// ValueStore is a typed key/value store backed by a Cache. Keys are namespaced
 // as {name}:v:{key} to prevent collisions with other stores on the same node.
 //
-// Create one ValueStore per logical value type and share a single Node:
-//
-//	sessions := hive.NewValueStore[Session](node, "sessions")
-//	users    := hive.NewValueStore[User](node, "users")
+//	sessions := hive.NewValueStore[Session](cache, "sessions")
+//	users    := hive.NewValueStore[User](cache, "users")
 type ValueStore[T any] struct {
 	cache  *Cache
 	prefix string
@@ -29,18 +29,19 @@ func (s *ValueStore[T]) Set(key string, value T) error {
 	if err != nil {
 		return fmt.Errorf("hive: %s.Set %q: %w", s.prefix, key, err)
 	}
-	return s.cache.cluster.Set(s.prefix+key, data)
+	_, err = s.cache.exec(transport.OpValueSet, s.prefix+key, data)
+	return err
 }
 
 // Get retrieves and decodes the value stored under key.
 // Returns an error if the key does not exist or has expired.
 func (s *ValueStore[T]) Get(key string) (T, error) {
 	var zero T
-	data, err := s.cache.cluster.Get(s.prefix + key)
+	results, err := s.cache.exec(transport.OpValueGet, s.prefix+key)
 	if err != nil {
 		return zero, fmt.Errorf("hive: %s.Get %q: %w", s.prefix, key, err)
 	}
-	value, err := decode[T](data)
+	value, err := decode[T](results[0])
 	if err != nil {
 		return zero, fmt.Errorf("hive: %s.Get %q: decode: %w", s.prefix, key, err)
 	}
@@ -49,11 +50,12 @@ func (s *ValueStore[T]) Get(key string) (T, error) {
 
 // Del removes key from the store.
 func (s *ValueStore[T]) Del(key string) error {
-	return s.cache.cluster.Del(s.prefix + key)
+	_, err := s.cache.exec(transport.OpDel, s.prefix+key)
+	return err
 }
 
 // Expire sets a TTL on key. The entry is deleted automatically after ttl elapses.
-// A ttl of 0 removes any existing expiry.
 func (s *ValueStore[T]) Expire(key string, ttl time.Duration) error {
-	return s.cache.cluster.Expire(s.prefix+key, ttl)
+	_, err := s.cache.exec(transport.OpExpire, s.prefix+key, encodeTTL(ttl))
+	return err
 }

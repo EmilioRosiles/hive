@@ -6,8 +6,6 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 const defaultTimeout = 3 * time.Second
@@ -83,16 +81,4 @@ func (c *Client) Close() {
 		c.mux.shutdown(nil)
 		c.mux = nil
 	}
-}
-
-// -- msgpack helpers used by the cluster layer --
-
-// Encode msgpack-encodes v into a byte slice.
-func Encode(v any) ([]byte, error) {
-	return msgpack.Marshal(v)
-}
-
-// Decode msgpack-decodes data into v.
-func Decode(data []byte, v any) error {
-	return msgpack.Unmarshal(data, v)
 }

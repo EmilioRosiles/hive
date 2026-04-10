@@ -14,8 +14,9 @@
 //	}
 //	defer node.Shutdown()
 //
-//	sessions := hive.NewValueStore[Session](node, "sessions")
-//	users    := hive.NewValueStore[User](node, "users")
+//	cache := node.Cache()
+//	sessions := hive.NewValueStore[Session](cache, "sessions")
+//	users    := hive.NewValueStore[User](cache, "users")
 //
 //	sessions.Set("abc", mySession)
 //	val, err := sessions.Get("abc")
@@ -23,16 +24,19 @@ package hive
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/EmilioRosiles/hive/internal/cluster"
+	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
 // Node is a single member of the Hive cluster. Create one per application
 // instance via NewNode. Multiple stores can share a single Node.
 type Node struct {
 	cfg     Config
-	cluster *cluster.Manager
+	cluster *cluster.Cluster
 }
 
 // NewNode creates and starts a Hive node with the given configuration.
@@ -49,7 +53,7 @@ func NewNode(cfg Config) (*Node, error) {
 		cfg.NodeID = id
 	}
 
-	mgr, err := cluster.NewManager(cluster.Config{
+	mgr, err := cluster.NewCluster(cluster.Config{
 		NodeID:            cfg.NodeID,
 		BindAddr:          cfg.BindAddr,
 		BindPort:          cfg.BindPort,
@@ -102,7 +106,22 @@ type ClusterStatus struct {
 // Cache is a handle to the cluster's data layer obtained from a Node.
 // It is the entry point for store constructors and cluster-wide operations.
 type Cache struct {
-	cluster *cluster.Manager
+	cluster *cluster.Cluster
+}
+
+// exec routes an op through the cluster and returns raw result slots.
+// Store files call this directly — no intermediate Manager methods.
+func (c *Cache) exec(op transport.Op, key string, args ...[]byte) ([][]byte, error) {
+	return c.cluster.Exec(op, key, args...)
+}
+
+// encodeTTL encodes a TTL as a big-endian uint64 nanosecond byte slice.
+// Returns nil for zero (no expiry) — the exec layer treats an absent slot as 0.
+func encodeTTL(ttl time.Duration) []byte {
+	if ttl == 0 {
+		return nil
+	}
+	return binary.BigEndian.AppendUint64(nil, uint64(ttl.Nanoseconds()))
 }
 
 func randomID() (string, error) {

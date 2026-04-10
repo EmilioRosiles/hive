@@ -99,7 +99,7 @@ func (ds *DataStore) Get(key string) (DataStructure, bool) {
 	if !ok {
 		return nil, false
 	}
-	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() > exp {
+	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() >= exp {
 		return nil, false
 	}
 	return e, true
@@ -146,7 +146,7 @@ func (ds *DataStore) Read(key string, fn func(DataStructure)) {
 	if !ok {
 		return
 	}
-	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() > exp {
+	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() >= exp {
 		return
 	}
 	fn(e)
@@ -188,7 +188,7 @@ func (ds *DataStore) Scan(cursor, count int, fn func(key string, e DataStructure
 		s := ds.shards[i]
 		s.mu.RLock()
 		for key, e := range s.data {
-			if exp := e.KeyExpiry(); exp != 0 && now > exp {
+			if exp := e.KeyExpiry(); exp != 0 && now >= exp {
 				continue
 			}
 			fn(key, e)
@@ -247,7 +247,7 @@ func (ds *DataStore) deleteExpired() {
 		s.mu.Lock()
 		for key, e := range s.data {
 			// Phase 1: key-level TTL — always evicts the whole entry.
-			if exp := e.KeyExpiry(); exp != 0 && nowUnix > exp {
+			if exp := e.KeyExpiry(); exp != 0 && nowUnix >= exp {
 				delete(s.data, key)
 				continue
 			}
