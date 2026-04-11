@@ -9,7 +9,8 @@ node, _ := hive.NewNode(hive.Config{
 })
 defer node.Shutdown()
 
-sessions := hive.NewValueStore[Session](node, "sessions")
+cache := node.Cache()
+sessions := hive.NewValueStore[Session](cache, "sessions")
 
 sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
 s, err := sessions.Get("user:123")
@@ -43,7 +44,8 @@ if err != nil {
 }
 defer node.Shutdown()
 
-counters := hive.NewValueStore[int](node, "counters")
+cache := node.Cache()
+counters := hive.NewValueStore[int](cache, "counters")
 counters.Set("visits", 42)
 
 v, err := counters.Get("visits")
@@ -84,7 +86,17 @@ for _, p := range status.Peers {
 
 ## Stores
 
-Multiple stores can share the same node — they are namespaced views over the same underlying cluster. Each store type maps to a Redis-style API.
+Multiple stores can share the same node — they are namespaced views over the same underlying cluster. Obtain a `Cache` handle from the node and pass it to each store constructor.
+
+```go
+cache := node.Cache()
+
+sessions := hive.NewValueStore[Session](cache, "sessions")
+online   := hive.NewSetStore(cache, "online_users")
+streams  := hive.NewHashStore[Stream](cache, "streams")
+```
+
+Each store type maps to a Redis-style API.
 
 ### ValueStore[T]
 
@@ -96,7 +108,7 @@ type Session struct {
     Token  string
 }
 
-sessions := hive.NewValueStore[Session](node, "sessions")
+sessions := hive.NewValueStore[Session](cache, "sessions")
 
 // Set stores a value.
 err := sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
@@ -116,7 +128,7 @@ sessions.Expire("user:123", 30*time.Minute)
 A distributed string set. Members can carry independent per-member TTLs, making it useful for tracking presence or short-lived memberships.
 
 ```go
-online := hive.NewSetStore(node, "online_users")
+online := hive.NewSetStore(cache, "online_users")
 
 // SAdd adds a member to the set at key.
 online.SAdd("room:1", "user:123")
@@ -151,7 +163,7 @@ type Stream struct {
     BitRate   int
 }
 
-streams := hive.NewHashStore[Stream](node, "streams")
+streams := hive.NewHashStore[Stream](cache, "streams")
 
 // HSet stores a value under key/field.
 streams.HSet("user:123", "stream:abc", Stream{StartedAt: time.Now()})
@@ -211,10 +223,11 @@ hive.Config{
     // Must be <= cluster size. Default: 1
     ReplicationFactor int
 
-    // Virtual nodes per physical node on the consistent hash ring.
-    // Higher values improve key distribution uniformity.
-    // Default: 100
-    VNodes int
+    // Maximum memory this node intends to use, in bytes.
+    // Used to compute the node's virtual node count on the hash ring —
+    // nodes with more memory receive proportionally more keyspace.
+    // Default: total system memory
+    MemLimit uint64
 
     // How often this node sends heartbeats to peers.
     // Default: 3s
@@ -233,6 +246,11 @@ hive.Config{
     // and its keys redistributed.
     // Default: 10s
     DeadTimeout time.Duration
+
+    // Verbosity of internal log output written to stderr.
+    // nil defaults to slog.LevelError (quiet).
+    // Set to &slog.LevelInfo or &slog.LevelDebug for more detail.
+    LogLevel *slog.Level
 }
 ```
 

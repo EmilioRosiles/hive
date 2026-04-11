@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
@@ -212,16 +213,28 @@ func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 	return transport.HeartbeatRequest{Peers: peers}
 }
 
-// announceLeave notifies alive peers that this node is departing.
+// announceLeave notifies all known peers that this node is departing.
+// It uses fresh per-peer connections so the announcement is not affected by
+// any stale client state from the gossip loop (which may still be running).
+// Sends are issued in parallel; the call blocks until all complete or fail.
 func (m *Cluster) announceLeave() {
 	payload, err := transport.Encode(transport.LeaveRequest{NodeID: m.cfg.NodeID})
 	if err != nil {
 		return
 	}
 	frame := transport.Frame{Type: transport.MsgLeave, Payload: payload}
-	for _, p := range m.randomAlivePeers(len(m.peers)) {
-		if client, ok := m.getClient(p.NodeID); ok {
-			client.Send(frame)
-		}
+
+	m.mu.RLock()
+	var wg sync.WaitGroup
+	for _, p := range m.peers {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			c := transport.NewClient(addr)
+			c.Send(frame) //nolint:errcheck — peer will detect departure via gossip if this fails
+		}(p.Addr)
 	}
+	m.mu.RUnlock()
+
+	wg.Wait()
 }

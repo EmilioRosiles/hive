@@ -13,7 +13,7 @@ func TestCluster_Formation(t *testing.T) {
 	n2, _ := clusterNode(t, []string{addr(n1)}, 1)
 	n3, _ := clusterNode(t, []string{addr(n1)}, 1)
 
-	waitFor(t, 3*time.Second, "all nodes see 2 peers", func() bool {
+	waitFor(t, 1*time.Second, "all nodes see 2 peers", func() bool {
 		return n1.Status().Size == 3 &&
 			n2.Status().Size == 3 &&
 			n3.Status().Size == 3
@@ -25,7 +25,7 @@ func TestCluster_ReadFromAnyNode(t *testing.T) {
 	n2, c2 := clusterNode(t, []string{addr(n1)}, 1)
 	_, c3 := clusterNode(t, []string{addr(n1)}, 1)
 
-	waitFor(t, 3*time.Second, "cluster formed", func() bool {
+	waitFor(t, 1*time.Second, "cluster formed", func() bool {
 		return n1.Status().Size == 3 && n2.Status().Size == 3
 	})
 
@@ -59,7 +59,7 @@ func TestCluster_SetStoreAcrossNodes(t *testing.T) {
 	n1, c1 := clusterNode(t, nil, 1)
 	n2, c2 := clusterNode(t, []string{addr(n1)}, 1)
 
-	waitFor(t, 3*time.Second, "cluster formed", func() bool {
+	waitFor(t, 1*time.Second, "cluster formed", func() bool {
 		return n1.Status().Size == 2 && n2.Status().Size == 2
 	})
 
@@ -83,7 +83,7 @@ func TestCluster_RebalanceOnJoin(t *testing.T) {
 	n1, c1 := clusterNode(t, nil, 1)
 	n2, _ := clusterNode(t, []string{addr(n1)}, 1)
 
-	waitFor(t, 3*time.Second, "2-node cluster formed", func() bool {
+	waitFor(t, 1*time.Second, "2-node cluster formed", func() bool {
 		return n1.Status().Size == 2 && n2.Status().Size == 2
 	})
 
@@ -96,7 +96,7 @@ func TestCluster_RebalanceOnJoin(t *testing.T) {
 
 	// Add a third node and wait for rebalance.
 	n3, c3 := clusterNode(t, []string{addr(n1)}, 1)
-	waitFor(t, 3*time.Second, "3-node cluster formed", func() bool {
+	waitFor(t, 1*time.Second, "3-node cluster formed", func() bool {
 		return n1.Status().Size == 3 && n3.Status().Size == 3
 	})
 	time.Sleep(300 * time.Millisecond) // let rebalance settle
@@ -117,7 +117,7 @@ func TestCluster_RebalanceOnJoin_ValueIntegrity(t *testing.T) {
 	n1, c1 := clusterNode(t, nil, 1)
 	n2, c2 := clusterNode(t, []string{addr(n1)}, 1)
 
-	waitFor(t, 3*time.Second, "2-node cluster formed", func() bool {
+	waitFor(t, 1*time.Second, "2-node cluster formed", func() bool {
 		return n1.Status().Size == 2 && n2.Status().Size == 2
 	})
 
@@ -133,7 +133,7 @@ func TestCluster_RebalanceOnJoin_ValueIntegrity(t *testing.T) {
 
 	// n3 joins; triggers rebalance — some keys migrate to n3.
 	n3, c3 := clusterNode(t, []string{addr(n1)}, 1)
-	waitFor(t, 3*time.Second, "3-node cluster formed", func() bool {
+	waitFor(t, 1*time.Second, "3-node cluster formed", func() bool {
 		return n1.Status().Size == 3 && n3.Status().Size == 3
 	})
 	time.Sleep(300 * time.Millisecond) // let rebalance settle
@@ -164,7 +164,7 @@ func TestCluster_NodeLeave_RF2(t *testing.T) {
 	n2, c2 := clusterNode(t, []string{addr(n1)}, 2)
 	n3, c3 := clusterNode(t, []string{addr(n1)}, 2)
 
-	waitFor(t, 3*time.Second, "cluster formed", func() bool {
+	waitFor(t, 1*time.Second, "cluster formed", func() bool {
 		return n1.Status().Size == 3 && n2.Status().Size == 3 && n3.Status().Size == 3
 	})
 
@@ -184,7 +184,7 @@ func TestCluster_NodeLeave_RF2(t *testing.T) {
 
 	// n3 leaves gracefully; peers immediately evict it and trigger rebalance.
 	n1.Shutdown()
-	waitFor(t, 3*time.Second, "n3 gone", func() bool {
+	waitFor(t, 2*time.Second, "n1 gone", func() bool {
 		return n2.Status().Size == 2 && n3.Status().Size == 2
 	})
 	time.Sleep(200 * time.Millisecond) // let rebalance settle
@@ -214,7 +214,7 @@ func TestCluster_SequentialLeaves_DataSurvives(t *testing.T) {
 	n2, _ := clusterNode(t, []string{addr(n1)}, 2)
 	n3, _ := clusterNode(t, []string{addr(n1)}, 2)
 
-	waitFor(t, 3*time.Second, "cluster formed", func() bool {
+	waitFor(t, 1*time.Second, "cluster formed", func() bool {
 		return n1.Status().Size == 3 && n2.Status().Size == 3 && n3.Status().Size == 3
 	})
 
@@ -232,14 +232,14 @@ func TestCluster_SequentialLeaves_DataSurvives(t *testing.T) {
 
 	// First departure: n3 leaves, rebalance redistributes its keys to n1/n2.
 	n3.Shutdown()
-	waitFor(t, 5*time.Second, "n3 gone", func() bool {
+	waitFor(t, 2*time.Second, "n3 gone", func() bool {
 		return n1.Status().Size == 2 && n2.Status().Size == 2
 	})
 	time.Sleep(200 * time.Millisecond) // let rebalance settle
 
 	// Second departure: n2 leaves, rebalance moves everything to n1.
 	n2.Shutdown()
-	waitFor(t, 5*time.Second, "n2 gone", func() bool {
+	waitFor(t, 2*time.Second, "n2 gone", func() bool {
 		return n1.Status().Size == 1
 	})
 	time.Sleep(200 * time.Millisecond) // let rebalance settle
@@ -262,7 +262,7 @@ func TestCluster_ReplicationFactor2(t *testing.T) {
 	n2, c2 := clusterNode(t, []string{addr(n1)}, 2)
 	n3, c3 := clusterNode(t, []string{addr(n1)}, 2)
 
-	waitFor(t, 3*time.Second, "cluster formed", func() bool {
+	waitFor(t, 1*time.Second, "cluster formed", func() bool {
 		return n1.Status().Size == 3 &&
 			n2.Status().Size == 3 &&
 			n3.Status().Size == 3
@@ -280,7 +280,7 @@ func TestCluster_ReplicationFactor2(t *testing.T) {
 		hive.NewValueStore[Session](c2, "sessions"),
 		hive.NewValueStore[Session](c3, "sessions"),
 	}
-	waitFor(t, 3*time.Second, "all keys replicated", func() bool {
+	waitFor(t, 1*time.Second, "all keys replicated", func() bool {
 		for _, s := range stores {
 			for _, k := range keys {
 				if _, err := s.Get(k); err != nil {

@@ -151,14 +151,14 @@ func (ds *DataStore) upsertEntry(s *shard, key string, e DataStructure) error {
 		if delta > 0 && ds.capacity > 0 && ds.used.Load()+delta > ds.capacity {
 			return ErrCapacityExceeded
 		}
-		size -= delta
+		ds.used.Add(delta)
 	} else {
 		if ds.capacity > 0 && ds.used.Load()+size > ds.capacity {
 			return ErrCapacityExceeded
 		}
+		ds.used.Add(size)
 	}
 
-	ds.used.Add(size)
 	e.setCachedSize(size)
 	s.data[key] = e
 	return nil
