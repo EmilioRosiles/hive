@@ -58,7 +58,7 @@ type Cluster struct {
 // In clustered mode it binds a TCP server and contacts Seeds to join.
 func NewCluster(cfg Config) (*Cluster, error) {
 	r := ring.New(cfg.ReplicationFactor)
-	ds := store.NewDataStore(30 * time.Second)
+	ds := store.NewDataStore(30*time.Second, cfg.MemLimit)
 	vNodeCount := computeVNodes(cfg.MemLimit)
 
 	m := &Cluster{

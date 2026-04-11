@@ -9,6 +9,7 @@ import (
 // SetStructure is a set of unique string members with optional per-member TTL.
 // The shard lock in DataStore protects all field access — no internal lock needed.
 type SetStructure struct {
+	sizeBase
 	members   map[string]int64 // member → expiresAt unix nanoseconds, 0 = no expiry
 	expiresAt int64            // key-level expiry, unix seconds, 0 = no expiry
 }
@@ -20,6 +21,14 @@ func NewSetStructure() *SetStructure {
 func (s *SetStructure) Kind() Kind           { return KindSet }
 func (s *SetStructure) KeyExpiry() int64     { return s.expiresAt }
 func (s *SetStructure) SetKeyExpiry(t int64) { s.expiresAt = t }
+
+func (s *SetStructure) ByteSize() int64 {
+	var n int64
+	for m := range s.members {
+		n += int64(len(m)) + 16 // member string + int64 expiry + map overhead
+	}
+	return n
+}
 
 // Add adds a member with no expiry. If the member already exists its TTL is cleared.
 func (s *SetStructure) Add(member string) {
@@ -75,7 +84,6 @@ func (s *SetStructure) ExpireMember(member string, ttl time.Duration) {
 		s.members[member] = time.Now().Add(ttl).UnixNano()
 	}
 }
-
 
 // Cleanup removes expired members and reports whether the set is empty.
 // Called by the DataStore janitor while the shard write lock is held.

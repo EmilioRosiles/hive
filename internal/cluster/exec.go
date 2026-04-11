@@ -62,8 +62,7 @@ func execExpire(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 // -- value ops --
 
 func execValueSet(m *Cluster, key string, args [][]byte) ([][]byte, error) {
-	m.store.Set(key, store.NewValueStructure(args[argValueSetData]))
-	return nil, nil
+	return nil, m.store.Set(key, store.NewValueStructure(args[argValueSetData]))
 }
 
 func execValueGet(m *Cluster, key string, _ [][]byte) ([][]byte, error) {

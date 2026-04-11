@@ -2,11 +2,17 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ErrCapacityExceeded is returned by write operations when the node has reached
+// its configured memory limit. Add more nodes to the cluster to increase capacity.
+var ErrCapacityExceeded = errors.New("hive: node memory limit reached")
 
 // Kind identifies the type of data structure stored under a key.
 type Kind uint8
@@ -34,9 +40,30 @@ type DataStructure interface {
 	// SetKeyExpiry sets the key-level expiry as a Unix timestamp in seconds.
 	// Pass 0 to clear the expiry.
 	SetKeyExpiry(unixSec int64)
+	// ByteSize returns the estimated in-memory byte cost of this value (excluding
+	// the key and per-entry overhead, which are added by the DataStore).
+	ByteSize() int64
+	// cachedSize / setCachedSize are package-internal bookkeeping used to track
+	// each entry's contribution to the global used counter.
+	cachedSize() int64
+	setCachedSize(int64)
 }
 
+// sizeBase holds the cached byte cost for a stored entry. Embed it in each
+// concrete DataStructure type to satisfy the unexported interface methods above.
+type sizeBase struct {
+	size int64
+}
+
+func (b *sizeBase) cachedSize() int64     { return b.size }
+func (b *sizeBase) setCachedSize(n int64) { b.size = n }
+
 // -- DataStore --
+
+// entryOverhead is the fixed per-entry cost added to ByteSize() to account for
+// the map bucket allocation. It does not need to be exact — the goal is accurate
+// capacity enforcement, not byte-perfect accounting.
+const entryOverhead = 64
 
 type shard struct {
 	mu   sync.RWMutex
@@ -47,15 +74,18 @@ type shard struct {
 type DataStore struct {
 	shards      []*shard
 	shardsCount uint64
+	used        atomic.Int64 // global byte estimate across all shards
+	capacity    int64        // global byte cap; 0 = unlimited, read-only after init
 	janitor     *janitor
 	decoders    map[Kind]DecodeFunc
 }
 
-func NewDataStore(cleanupInterval time.Duration) *DataStore {
+func NewDataStore(cleanupInterval time.Duration, memLimit uint64) *DataStore {
 	n := shardCount()
 	ds := &DataStore{
 		shards:      make([]*shard, n),
 		shardsCount: n,
+		capacity:    int64(memLimit),
 		decoders: map[Kind]DecodeFunc{
 			KindValue: func(data []byte) (DataStructure, error) { return NewValueStructure(data), nil },
 			KindSet:   func(data []byte) (DataStructure, error) { return DecodeSetStructure(data) },
@@ -98,6 +128,42 @@ func (ds *DataStore) getShard(key string) *shard {
 	return ds.shards[h&(ds.shardsCount-1)]
 }
 
+// removeEntry removes key from s, decrementing the global used counter.
+// Must be called with s's write lock held.
+func (ds *DataStore) removeEntry(s *shard, key string) {
+	e, ok := s.data[key]
+	if !ok {
+		return
+	}
+	ds.used.Add(-e.cachedSize())
+	delete(s.data, key)
+}
+
+// upsertEntry inserts or replaces key in s, updating the global used counter.
+// Returns ErrCapacityExceeded if the write would push used above capacity.
+// Overwrites that reduce or maintain entry size always succeed.
+// Must be called with s's write lock held.
+func (ds *DataStore) upsertEntry(s *shard, key string, e DataStructure) error {
+	size := int64(len(key)) + e.ByteSize() + entryOverhead
+
+	if old, ok := s.data[key]; ok {
+		delta := size - old.cachedSize()
+		if delta > 0 && ds.capacity > 0 && ds.used.Load()+delta > ds.capacity {
+			return ErrCapacityExceeded
+		}
+		size -= delta
+	} else {
+		if ds.capacity > 0 && ds.used.Load()+size > ds.capacity {
+			return ErrCapacityExceeded
+		}
+	}
+
+	ds.used.Add(size)
+	e.setCachedSize(size)
+	s.data[key] = e
+	return nil
+}
+
 func (ds *DataStore) Get(key string) (DataStructure, bool) {
 	s := ds.getShard(key)
 	s.mu.RLock()
@@ -113,17 +179,18 @@ func (ds *DataStore) Get(key string) (DataStructure, bool) {
 	return e, true
 }
 
-func (ds *DataStore) Set(key string, e DataStructure) {
+func (ds *DataStore) Set(key string, e DataStructure) error {
 	s := ds.getShard(key)
 	s.mu.Lock()
-	s.data[key] = e
+	err := ds.upsertEntry(s, key, e)
 	s.mu.Unlock()
+	return err
 }
 
 func (ds *DataStore) Del(key string) {
 	s := ds.getShard(key)
 	s.mu.Lock()
-	delete(s.data, key)
+	ds.removeEntry(s, key)
 	s.mu.Unlock()
 }
 
@@ -145,11 +212,12 @@ func (ds *DataStore) Expire(key string, ttl time.Duration) bool {
 
 // Read runs fn under the shard read lock for key.
 // fn is only called if the key exists and has not expired.
-// Multiple readers can proceed concurrently; fn must not block or write.
+// fn must not block or write.
 func (ds *DataStore) Read(key string, fn func(DataStructure)) {
 	s := ds.getShard(key)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	e, ok := s.data[key]
 	if !ok {
 		return
@@ -172,11 +240,10 @@ func (ds *DataStore) Apply(key string, fn func(DataStructure) (DataStructure, er
 		return err
 	}
 	if next == nil {
-		delete(s.data, key)
-	} else {
-		s.data[key] = next
+		ds.removeEntry(s, key)
+		return nil
 	}
-	return nil
+	return ds.upsertEntry(s, key, next)
 }
 
 // Scan iterates over all live (non-expired) entries. Pass cursor=-1 to scan all shards.
@@ -254,16 +321,12 @@ func (ds *DataStore) deleteExpired() {
 		s := ds.shards[i]
 		s.mu.Lock()
 		for key, e := range s.data {
-			// Phase 1: key-level TTL — always evicts the whole entry.
 			if exp := e.KeyExpiry(); exp != 0 && nowUnix >= exp {
-				delete(s.data, key)
+				ds.removeEntry(s, key)
 				continue
 			}
-			// Phase 2: field-level cleanup (Sets, Hashes).
-			// Cleanup removes expired sub-fields and returns true if the
-			// structure is now empty and should itself be deleted.
 			if e.Cleanup(now) {
-				delete(s.data, key)
+				ds.removeEntry(s, key)
 			}
 		}
 		s.mu.Unlock()

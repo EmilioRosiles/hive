@@ -19,6 +19,7 @@ func (f hashField) alive(nowNs int64) bool {
 // HashStructure is a map of string fields to typed values with optional per-field TTL.
 // The shard lock in DataStore protects all field access — no internal lock needed.
 type HashStructure struct {
+	sizeBase
 	fields    map[string]hashField
 	expiresAt int64 // key-level expiry, unix seconds, 0 = no expiry
 }
@@ -30,6 +31,14 @@ func NewHashStructure() *HashStructure {
 func (h *HashStructure) Kind() Kind           { return KindHash }
 func (h *HashStructure) KeyExpiry() int64     { return h.expiresAt }
 func (h *HashStructure) SetKeyExpiry(t int64) { h.expiresAt = t }
+
+func (h *HashStructure) ByteSize() int64 {
+	var n int64
+	for name, f := range h.fields {
+		n += int64(len(name)+len(f.Data)) + 16 // name + data + int64 expiry + map overhead
+	}
+	return n
+}
 
 // HSet sets field to data with no expiry. An existing TTL is cleared.
 func (h *HashStructure) HSet(field string, data []byte) {
