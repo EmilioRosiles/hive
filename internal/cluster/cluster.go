@@ -34,7 +34,6 @@ type Config struct {
 	GossipInterval    time.Duration
 	GossipFanout      int
 	RebalanceDebounce time.Duration
-	DeadTimeout       time.Duration
 	CleanupInterval   time.Duration
 	Clustered         bool
 }
@@ -80,7 +79,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		clients: make(map[string]*transport.Client),
 		stopCh:  make(chan struct{}),
 	}
-	m.incarnation.Store(1)
+	m.incarnation.Store(uint64(time.Now().UnixNano()))
 	m.ring.Add(cfg.NodeID, vNodeCount)
 	m.rebalancer = newRebalancer(cfg.RebalanceDebounce, m)
 	go m.startJanitor()
@@ -202,10 +201,6 @@ func (m *Cluster) startJanitor() {
 }
 
 func (m *Cluster) evictDeadPeers() {
-	if m.cfg.DeadTimeout == 0 {
-		return
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for nodeID, p := range m.peers {

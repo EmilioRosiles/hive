@@ -135,10 +135,7 @@ func (m *Cluster) bootstrap(addr string) {
 func (m *Cluster) mergeState(remote []transport.PeerState) error {
 	for _, rs := range remote {
 		if rs.NodeID == m.cfg.NodeID {
-			if NodeStatus(rs.Status) != NodeAlive {
-				m.refuteSuspicion(rs.Incarnation)
-			}
-			continue
+			continue // our own state is authoritative; skip
 		}
 
 		local, exists := m.getPeer(rs.NodeID)
@@ -157,34 +154,28 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 			local.Incarnation = rs.Incarnation
 			localStatus := NodeStatus(local.Status)
 			m.mu.Unlock()
-			remoteStatus := NodeStatus(rs.Status)
 
-			if remoteStatus == NodeDead && localStatus == NodeAlive {
-				m.markDead(rs.NodeID)
-			} else if err := m.addPeer(rs); err != nil {
-				return err
+			switch NodeStatus(rs.Status) {
+			case NodeDead:
+				if localStatus == NodeAlive {
+					m.markDead(rs.NodeID)
+				}
+			case NodeAlive:
+				if err := m.addPeer(rs); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	return nil
 }
 
-// refuteSuspicion bumps selfIncarnation so it strictly exceeds remoteIncarnation.
-// This ensures that the next gossip round advertises us as alive with a higher
-// incarnation than whatever dead/suspect rumor is circulating.
-func (m *Cluster) refuteSuspicion(remoteIncarnation uint64) {
-	for {
-		cur := m.incarnation.Load()
-		next := max(cur, remoteIncarnation) + 1
-		if m.incarnation.CompareAndSwap(cur, next) {
-			slog.Info("cluster: refuted dead rumor, incremented incarnation", "incarnation", next)
-			return
-		}
-	}
-}
-
 // buildHeartbeatRequest assembles the current node's peer list for gossip.
+// Incarnation is bumped on every call so each outgoing heartbeat carries a
+// strictly higher value than the previous one, ensuring our alive state beats
+// any stale dead rumour without needing an explicit refutation step.
 func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
+	m.incarnation.Add(1)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
