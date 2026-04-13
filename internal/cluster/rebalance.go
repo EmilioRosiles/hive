@@ -175,7 +175,7 @@ func migrationLeader(oldOwners, newOwners []string, m *Cluster) string {
 		if id == m.cfg.NodeID {
 			return id
 		}
-		if p, ok := m.getPeer(id); ok && p.Alive {
+		if p, ok := m.getPeer(id); ok && p.Status == NodeAlive {
 			return id
 		}
 	}

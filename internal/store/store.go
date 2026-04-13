@@ -76,11 +76,10 @@ type DataStore struct {
 	shardsCount uint64
 	used        atomic.Int64 // global byte estimate across all shards
 	capacity    int64        // global byte cap; 0 = unlimited, read-only after init
-	janitor     *janitor
 	decoders    map[Kind]DecodeFunc
 }
 
-func NewDataStore(cleanupInterval time.Duration, memLimit uint64) *DataStore {
+func NewDataStore(memLimit uint64) *DataStore {
 	n := shardCount()
 	ds := &DataStore{
 		shards:      make([]*shard, n),
@@ -94,12 +93,6 @@ func NewDataStore(cleanupInterval time.Duration, memLimit uint64) *DataStore {
 	}
 	for i := range n {
 		ds.shards[i] = &shard{data: make(map[string]DataStructure)}
-	}
-	if cleanupInterval > 0 {
-		j := &janitor{interval: cleanupInterval, stop: make(chan struct{})}
-		ds.janitor = j
-		go j.run(ds)
-		runtime.SetFinalizer(ds, stopJanitor)
 	}
 	return ds
 }
@@ -272,11 +265,6 @@ func (ds *DataStore) Scan(cursor, count int, fn func(key string, e DataStructure
 	}
 }
 
-func (ds *DataStore) Stop() {
-	if ds.janitor != nil {
-		ds.janitor.stop <- struct{}{}
-	}
-}
 
 // shardCount returns the next power of 2 >= NumCPU*4.
 func shardCount() uint64 {
@@ -294,27 +282,10 @@ func shardCount() uint64 {
 	return uint64(n)
 }
 
-// -- janitor --
-
-type janitor struct {
-	interval time.Duration
-	stop     chan struct{}
-}
-
-func (j *janitor) run(ds *DataStore) {
-	ticker := time.NewTicker(j.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			ds.deleteExpired()
-		case <-j.stop:
-			return
-		}
-	}
-}
-
-func (ds *DataStore) deleteExpired() {
+// DeleteExpired sweeps all shards, removing entries whose key-level TTL has
+// elapsed and sub-structures (sets, hashes) whose all members have expired.
+// Called by the cluster janitor on each cleanup tick.
+func (ds *DataStore) DeleteExpired() {
 	now := time.Now()
 	nowUnix := now.Unix()
 	for i := range ds.shardsCount {
@@ -333,6 +304,3 @@ func (ds *DataStore) deleteExpired() {
 	}
 }
 
-func stopJanitor(ds *DataStore) {
-	ds.janitor.stop <- struct{}{}
-}

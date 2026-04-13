@@ -70,7 +70,7 @@ func NewNode(cfg Config) (*Node, error) {
 		GossipInterval:    cfg.GossipInterval,
 		GossipFanout:      cfg.GossipFanout,
 		RebalanceDebounce: cfg.RebalanceDebounce,
-		DeadTimeout:       cfg.DeadTimeout,
+		CleanupInterval:   cfg.CleanupInterval,
 		Clustered:         cfg.Mode == ModeCluster,
 	})
 	if err != nil {
@@ -96,10 +96,16 @@ func (n *Node) Shutdown() error {
 // Status returns a snapshot of the current cluster state.
 func (n *Node) Status() ClusterStatus {
 	peers := n.cluster.Peers()
+	alive := 0
+	for _, p := range peers {
+		if p.Status == cluster.NodeAlive {
+			alive++
+		}
+	}
 	return ClusterStatus{
 		Config: n.cfg,
 		Peers:  peers,
-		Size:   len(peers) + 1,
+		Size:   alive + 1,
 	}
 }
 

@@ -1,8 +1,6 @@
 // Package transport handles peer-to-peer communication between Hive nodes.
 package transport
 
-import "time"
-
 // MsgType identifies the type of message in a frame.
 type MsgType uint8
 
@@ -11,6 +9,7 @@ const (
 	MsgForward                      // route a command to the responsible node
 	MsgRebalance                    // bulk key migration during rebalance
 	MsgLeave                        // graceful departure announcement
+	MsgProbe                        // indirect reachability probe
 )
 
 // Frame is the envelope wrapping every message on the wire.
@@ -23,11 +22,14 @@ type Frame struct {
 
 // -- Heartbeat --
 
+// PeerState is the wire representation of a node's view of a cluster member.
+// Incarnation is the authoritative ordering key: a remote update is applied
+// only when its Incarnation strictly exceeds the locally held value.
 type PeerState struct {
 	NodeID            string
 	Addr              string
-	Alive             bool
-	LastSeen          time.Time
+	Status            uint8
+	Incarnation       uint64
 	ReplicationFactor int
 	MemLimit          uint64
 }

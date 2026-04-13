@@ -145,7 +145,7 @@ func (m *Cluster) fanOutReplicas(req transport.ForwardRequest, nodes []string) {
 				return
 			}
 			if _, err := m.sendReq(nodeID, req); err != nil {
-				m.handlePeerError(nodeID)
+				m.markDead(nodeID)
 			}
 		}()
 	}
@@ -178,8 +178,4 @@ func (m *Cluster) sendReq(nodeID string, req transport.ForwardRequest) (transpor
 // It delegates to dispatch, keeping routing logic internal to this package.
 func (m *Cluster) Exec(op transport.Op, key string, args ...[]byte) ([][]byte, error) {
 	return m.dispatch(op, key, args...)
-}
-
-func (m *Cluster) handlePeerError(nodeID string) {
-	m.markDead(nodeID)
 }

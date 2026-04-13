@@ -7,11 +7,20 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/ring"
 	"github.com/EmilioRosiles/hive/internal/store"
 	"github.com/EmilioRosiles/hive/internal/transport"
+)
+
+// NodeStatus represents a peer's liveness state in the cluster.
+type NodeStatus uint8
+
+const (
+	NodeAlive NodeStatus = 0
+	NodeDead  NodeStatus = 1
 )
 
 // Config holds all configuration for the cluster manager.
@@ -26,6 +35,7 @@ type Config struct {
 	GossipFanout      int
 	RebalanceDebounce time.Duration
 	DeadTimeout       time.Duration
+	CleanupInterval   time.Duration
 	Clustered         bool
 }
 
@@ -34,31 +44,32 @@ type Config struct {
 type PeerInfo struct {
 	NodeID            string
 	Addr              string
-	Alive             bool
-	LastSeen          time.Time
+	Status            NodeStatus
+	Incarnation       uint64
 	ReplicationFactor int
 	MemLimit          uint64
 }
 
 // Cluster owns the cluster state for this node.
 type Cluster struct {
-	mu         sync.RWMutex
-	cfg        Config
-	ring       *ring.Ring
-	store      *store.DataStore
-	peers      map[string]*PeerInfo
-	clients    map[string]*transport.Client
-	rebalancer *rebalancer
-	server     *transport.Server
-	stopCh     chan struct{}
-	stopOnce   sync.Once
+	mu          sync.RWMutex
+	cfg         Config
+	ring        *ring.Ring
+	store       *store.DataStore
+	peers       map[string]*PeerInfo
+	clients     map[string]*transport.Client
+	rebalancer  *rebalancer
+	server      *transport.Server
+	stopCh      chan struct{}
+	stopOnce    sync.Once
+	incarnation atomic.Uint64
 }
 
 // NewCluster creates and starts a cluster Cluster.
 // In clustered mode it binds a TCP server and contacts Seeds to join.
 func NewCluster(cfg Config) (*Cluster, error) {
 	r := ring.New(cfg.ReplicationFactor)
-	ds := store.NewDataStore(30*time.Second, cfg.MemLimit)
+	ds := store.NewDataStore(cfg.MemLimit)
 	vNodeCount := computeVNodes(cfg.MemLimit)
 
 	m := &Cluster{
@@ -69,9 +80,10 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		clients: make(map[string]*transport.Client),
 		stopCh:  make(chan struct{}),
 	}
-
+	m.incarnation.Store(1)
 	m.ring.Add(cfg.NodeID, vNodeCount)
 	m.rebalancer = newRebalancer(cfg.RebalanceDebounce, m)
+	go m.startJanitor()
 
 	if cfg.Clustered {
 		addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.BindPort)
@@ -81,11 +93,9 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		}
 		m.server = srv
 		go srv.Serve()
-
 		for _, seed := range cfg.Seeds {
 			m.bootstrap(seed)
 		}
-
 		go m.startGossip()
 	}
 
@@ -100,7 +110,6 @@ func (m *Cluster) Shutdown() error {
 	var err error
 	m.stopOnce.Do(func() {
 		close(m.stopCh)
-		m.store.Stop()
 		if m.server != nil {
 			m.announceLeave()
 			err = m.server.Close()
@@ -123,9 +132,6 @@ func (m *Cluster) Peers() []PeerInfo {
 
 // addPeer registers a peer and opens a connection to it.
 // Returns an error if the peer's ReplicationFactor conflicts with ours.
-// No-op if the peer is already known and alive.
-// ps must have a non-empty NodeID — bootstrap ensures this before any peer
-// is inserted into the ring.
 func (m *Cluster) addPeer(ps transport.PeerState) error {
 	if ps.ReplicationFactor != 0 && ps.ReplicationFactor != m.cfg.ReplicationFactor {
 		return fmt.Errorf("replication factor mismatch: local=%d peer=%d (addr=%s) — all nodes must be configured with the same ReplicationFactor",
@@ -137,9 +143,9 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	defer m.mu.Unlock()
 
 	if p, ok := m.peers[ps.NodeID]; ok {
-		if !p.Alive {
-			p.Alive = true
-			p.LastSeen = time.Now()
+		if p.Status != NodeAlive {
+			p.Status = NodeAlive
+			p.Incarnation = ps.Incarnation
 			m.ring.Add(ps.NodeID, vNodeCount)
 			m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
 			go m.rebalancer.schedule()
@@ -150,8 +156,8 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	m.peers[ps.NodeID] = &PeerInfo{
 		NodeID:            ps.NodeID,
 		Addr:              ps.Addr,
-		Alive:             true,
-		LastSeen:          time.Now(),
+		Status:            NodeAlive,
+		Incarnation:       ps.Incarnation,
 		ReplicationFactor: ps.ReplicationFactor,
 		MemLimit:          ps.MemLimit,
 	}
@@ -163,38 +169,51 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	return nil
 }
 
-// markDead flags a peer as unreachable and drops its client connection,
-// but leaves it in the ring until DeadTimeout elapses.
+// markDead promotes a peer to the Dead state.
 func (m *Cluster) markDead(nodeID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	p, ok := m.peers[nodeID]
-	if !ok || !p.Alive {
+	if !ok || p.Status == NodeDead {
 		return
 	}
-	p.Alive = false
-	p.LastSeen = time.Now()
+	p.Status = NodeDead
+	m.ring.Remove(nodeID)
 	delete(m.clients, nodeID)
-
+	go m.rebalancer.schedule()
 	slog.Warn("cluster: peer marked dead", "node", nodeID)
 }
 
-// evictPeer removes a peer from the ring and triggers rebalance.
-// Called only after DeadTimeout has elapsed since the peer was marked dead.
-func (m *Cluster) evictPeer(nodeID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// startJanitor runs the cleanup loop until the node shuts down.
+// On each tick it removes expired store entries and evicts dead-peer tombstones.
+func (m *Cluster) startJanitor() {
+	ticker := time.NewTicker(m.cfg.CleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.store.DeleteExpired()
+			m.evictDeadPeers()
+		case <-m.stopCh:
+			return
+		}
+	}
+}
 
-	p, ok := m.peers[nodeID]
-	if !ok {
+func (m *Cluster) evictDeadPeers() {
+	if m.cfg.DeadTimeout == 0 {
 		return
 	}
-	delete(m.peers, nodeID)
-	m.ring.Remove(nodeID)
-	go m.rebalancer.schedule()
 
-	slog.Warn("cluster: peer evicted", "addr", p.Addr)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for nodeID, p := range m.peers {
+		if p.Status == NodeDead {
+			delete(m.peers, nodeID)
+			slog.Info("cluster: evicted dead peer tombstone", "node", nodeID)
+		}
+	}
 }
 
 // getPeer returns a peer by node ID.
@@ -220,7 +239,7 @@ func (m *Cluster) randomAlivePeers(n int) []*PeerInfo {
 
 	alive := make([]*PeerInfo, 0, len(m.peers))
 	for _, p := range m.peers {
-		if p.Alive {
+		if p.Status == NodeAlive {
 			alive = append(alive, p)
 		}
 	}

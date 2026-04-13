@@ -185,6 +185,7 @@ func TestCluster_NodeLeave_RF2(t *testing.T) {
 	// n3 leaves gracefully; peers immediately evict it and trigger rebalance.
 	n1.Shutdown()
 	waitFor(t, 2*time.Second, "n1 gone", func() bool {
+		fmt.Printf("%v \n", n2.Status().Size)
 		return n2.Status().Size == 2 && n3.Status().Size == 2
 	})
 	time.Sleep(200 * time.Millisecond) // let rebalance settle

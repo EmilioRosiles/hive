@@ -65,10 +65,10 @@ type Config struct {
 	// Defaults to 500ms.
 	RebalanceDebounce time.Duration
 
-	// DeadTimeout is how long a peer can miss heartbeats before being
-	// marked dead and removed from the ring.
-	// Defaults to 10s.
-	DeadTimeout time.Duration
+	// CleanupInterval is how often the cluster janitor runs to evict dead peer
+	// tombstones and expired store entries.
+	// Default: 30s
+	CleanupInterval time.Duration
 
 	// LogLevel controls the verbosity of internal log output.
 	// nil defaults to slog.LevelError (quiet). Set explicitly to enable
@@ -86,7 +86,7 @@ func defaultConfig() Config {
 		GossipInterval:    3 * time.Second,
 		GossipFanout:      3,
 		RebalanceDebounce: 500 * time.Millisecond,
-		DeadTimeout:       10 * time.Second,
+		CleanupInterval:   30 * time.Second,
 	}
 }
 
@@ -113,10 +113,10 @@ func (c *Config) applyDefaults() {
 	if c.RebalanceDebounce == 0 {
 		c.RebalanceDebounce = d.RebalanceDebounce
 	}
-	if c.DeadTimeout == 0 {
-		c.DeadTimeout = d.DeadTimeout
-	}
 	if c.MemLimit == 0 {
 		c.MemLimit = d.MemLimit
+	}
+	if c.CleanupInterval == 0 {
+		c.CleanupInterval = d.CleanupInterval
 	}
 }
