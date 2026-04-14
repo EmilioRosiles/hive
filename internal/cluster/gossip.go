@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
@@ -31,7 +33,6 @@ func (m *Cluster) handleLeave(payload []byte) error {
 		return fmt.Errorf("handler: decode leave: %w", err)
 	}
 	m.markDead(req.NodeID)
-	m.evictPeer(req.NodeID)
 	return nil
 }
 
@@ -50,24 +51,7 @@ func (m *Cluster) startGossip() {
 
 		targets := m.randomAlivePeers(m.cfg.GossipFanout)
 		m.heartbeat(targets...)
-		m.evictDeadPeers()
 		go m.rebalancer.schedule()
-	}
-}
-
-// evictDeadPeers removes peers that have been dead longer than DeadTimeout.
-func (m *Cluster) evictDeadPeers() {
-	m.mu.RLock()
-	var toEvict []string
-	for nodeID, p := range m.peers {
-		if !p.Alive && time.Since(p.LastSeen) > m.cfg.DeadTimeout {
-			toEvict = append(toEvict, nodeID)
-		}
-	}
-	m.mu.RUnlock()
-
-	for _, nodeID := range toEvict {
-		m.evictPeer(nodeID)
 	}
 }
 
@@ -146,16 +130,18 @@ func (m *Cluster) bootstrap(addr string) {
 
 // mergeState reconciles a peer's view of the cluster with our own.
 // Returns the first error encountered, e.g. a replication factor mismatch.
+// Incarnation is the authoritative ordering key. A remote state update is
+// applied only when its Incarnation greater than what we hold locally.
 func (m *Cluster) mergeState(remote []transport.PeerState) error {
 	for _, rs := range remote {
-		if rs.NodeID == "" || rs.NodeID == m.cfg.NodeID {
-			continue
+		if rs.NodeID == m.cfg.NodeID {
+			continue // our own state is authoritative; skip
 		}
 
 		local, exists := m.getPeer(rs.NodeID)
 
 		if !exists {
-			if rs.Alive {
+			if NodeStatus(rs.Status) == NodeAlive {
 				if err := m.addPeer(rs); err != nil {
 					return err
 				}
@@ -163,15 +149,18 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 			continue
 		}
 
-		if rs.LastSeen.After(local.LastSeen) {
+		if rs.Incarnation > local.Incarnation {
 			m.mu.Lock()
-			local.LastSeen = rs.LastSeen
-			local.Addr = rs.Addr
+			local.Incarnation = rs.Incarnation
+			localStatus := NodeStatus(local.Status)
 			m.mu.Unlock()
 
-			if !rs.Alive && local.Alive {
-				m.markDead(rs.NodeID)
-			} else if rs.Alive && !local.Alive {
+			switch NodeStatus(rs.Status) {
+			case NodeDead:
+				if localStatus == NodeAlive {
+					m.markDead(rs.NodeID)
+				}
+			case NodeAlive:
 				if err := m.addPeer(rs); err != nil {
 					return err
 				}
@@ -182,18 +171,22 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 }
 
 // buildHeartbeatRequest assembles the current node's peer list for gossip.
+// Incarnation is bumped on every call so each outgoing heartbeat carries a
+// strictly higher value than the previous one, ensuring our alive state beats
+// any stale dead rumour without needing an explicit refutation step.
 func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
+	m.incarnation.Add(1)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	peers := make([]transport.PeerState, 0, len(m.peers)+1)
 
-	// Include self.
+	// Include self — always alive from our own perspective.
 	peers = append(peers, transport.PeerState{
 		NodeID:            m.cfg.NodeID,
 		Addr:              fmt.Sprintf("%s:%d", m.cfg.BindAddr, m.cfg.BindPort),
-		Alive:             true,
-		LastSeen:          time.Now(),
+		Status:            uint8(NodeAlive),
+		Incarnation:       m.incarnation.Load(),
 		ReplicationFactor: m.cfg.ReplicationFactor,
 		MemLimit:          m.cfg.MemLimit,
 	})
@@ -202,8 +195,8 @@ func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 		peers = append(peers, transport.PeerState{
 			NodeID:            p.NodeID,
 			Addr:              p.Addr,
-			Alive:             p.Alive,
-			LastSeen:          p.LastSeen,
+			Status:            uint8(p.Status),
+			Incarnation:       p.Incarnation,
 			ReplicationFactor: p.ReplicationFactor,
 			MemLimit:          p.MemLimit,
 		})
@@ -212,16 +205,26 @@ func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 	return transport.HeartbeatRequest{Peers: peers}
 }
 
-// announceLeave notifies alive peers that this node is departing.
+// announceLeave notifies all known peers that this node is departing.
 func (m *Cluster) announceLeave() {
+	m.incarnation.Store(math.MaxUint64)
 	payload, err := transport.Encode(transport.LeaveRequest{NodeID: m.cfg.NodeID})
 	if err != nil {
 		return
 	}
 	frame := transport.Frame{Type: transport.MsgLeave, Payload: payload}
-	for _, p := range m.randomAlivePeers(len(m.peers)) {
-		if client, ok := m.getClient(p.NodeID); ok {
-			client.Send(frame)
-		}
+
+	m.mu.RLock()
+	var wg sync.WaitGroup
+	for _, p := range m.peers {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			c := transport.NewClient(addr)
+			c.Send(frame)
+		}(p.Addr)
 	}
+	m.mu.RUnlock()
+
+	wg.Wait()
 }

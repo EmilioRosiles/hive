@@ -24,11 +24,9 @@ package hive
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/EmilioRosiles/hive/internal/cluster"
 	"github.com/EmilioRosiles/hive/internal/transport"
@@ -70,7 +68,7 @@ func NewNode(cfg Config) (*Node, error) {
 		GossipInterval:    cfg.GossipInterval,
 		GossipFanout:      cfg.GossipFanout,
 		RebalanceDebounce: cfg.RebalanceDebounce,
-		DeadTimeout:       cfg.DeadTimeout,
+		CleanupInterval:   cfg.CleanupInterval,
 		Clustered:         cfg.Mode == ModeCluster,
 	})
 	if err != nil {
@@ -96,10 +94,16 @@ func (n *Node) Shutdown() error {
 // Status returns a snapshot of the current cluster state.
 func (n *Node) Status() ClusterStatus {
 	peers := n.cluster.Peers()
+	alive := 0
+	for _, p := range peers {
+		if p.Status == cluster.NodeAlive {
+			alive++
+		}
+	}
 	return ClusterStatus{
 		Config: n.cfg,
 		Peers:  peers,
-		Size:   len(peers) + 1,
+		Size:   alive + 1,
 	}
 }
 
@@ -120,15 +124,6 @@ type Cache struct {
 // Store files call this directly — no intermediate Manager methods.
 func (c *Cache) exec(op transport.Op, key string, args ...[]byte) ([][]byte, error) {
 	return c.cluster.Exec(op, key, args...)
-}
-
-// encodeTTL encodes a TTL as a big-endian uint64 nanosecond byte slice.
-// Returns nil for zero (no expiry) — the exec layer treats an absent slot as 0.
-func encodeTTL(ttl time.Duration) []byte {
-	if ttl == 0 {
-		return nil
-	}
-	return binary.BigEndian.AppendUint64(nil, uint64(ttl.Nanoseconds()))
 }
 
 func randomID() (string, error) {

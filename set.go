@@ -1,7 +1,6 @@
 package hive
 
 import (
-	"encoding/binary"
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
@@ -64,7 +63,7 @@ func (s *SetStore) SCard(key string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return int(binary.BigEndian.Uint64(results[0])), nil
+	return decodeInt(results[0]), nil
 }
 
 // Del removes the entire set at key.

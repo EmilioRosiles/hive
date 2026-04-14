@@ -33,7 +33,9 @@ func (m *Cluster) handleRebalance(payload []byte) ([]byte, error) {
 			}
 			entry.SetKeyExpiry(received.Add(remaining).Unix())
 		}
-		m.store.Set(re.Key, entry)
+		if err := m.store.ApplyIfNewer(re.Key, entry); err != nil {
+			slog.Warn("rebalance: store failed", "key", re.Key, "err", err)
+		}
 	}
 	return nil, nil
 }
@@ -175,7 +177,7 @@ func migrationLeader(oldOwners, newOwners []string, m *Cluster) string {
 		if id == m.cfg.NodeID {
 			return id
 		}
-		if p, ok := m.getPeer(id); ok && p.Alive {
+		if p, ok := m.getPeer(id); ok && p.Status == NodeAlive {
 			return id
 		}
 	}

@@ -47,7 +47,6 @@ func clusterNode(t *testing.T, seeds []string, rf int) (*hive.Node, *hive.Cache)
 		GossipInterval:    100 * time.Millisecond,
 		GossipFanout:      3,
 		RebalanceDebounce: 50 * time.Millisecond,
-		DeadTimeout:       2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("clusterNode: %v", err)

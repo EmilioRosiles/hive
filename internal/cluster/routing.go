@@ -44,6 +44,24 @@ var opRegistry = map[transport.Op]opDef{
 	transport.OpHGetAll:      {Exec: execHGetAll, Scope: ScopeRead},
 	transport.OpHKeys:        {Exec: execHKeys, Scope: ScopeRead},
 	transport.OpHExpireField: {Exec: execHExpireField, Scope: ScopeWrite},
+
+	transport.OpLPush:  {Exec: execLPush, Scope: ScopeWrite},
+	transport.OpRPush:  {Exec: execRPush, Scope: ScopeWrite},
+	transport.OpLPop:   {Exec: execLPop, Scope: ScopeWrite},
+	transport.OpRPop:   {Exec: execRPop, Scope: ScopeWrite},
+	transport.OpLLen:   {Exec: execLLen, Scope: ScopeRead},
+	transport.OpLIndex: {Exec: execLIndex, Scope: ScopeRead},
+	transport.OpLRange: {Exec: execLRange, Scope: ScopeRead},
+	transport.OpLSet:   {Exec: execLSet, Scope: ScopeWrite},
+
+	transport.OpZAdd:          {Exec: execZAdd, Scope: ScopeWrite},
+	transport.OpZRem:          {Exec: execZRem, Scope: ScopeWrite},
+	transport.OpZScore:        {Exec: execZScore, Scope: ScopeRead},
+	transport.OpZRank:         {Exec: execZRank, Scope: ScopeRead},
+	transport.OpZCard:         {Exec: execZCard, Scope: ScopeRead},
+	transport.OpZRange:        {Exec: execZRange, Scope: ScopeRead},
+	transport.OpZRangeByScore: {Exec: execZRangeByScore, Scope: ScopeRead},
+	transport.OpZRevRank:      {Exec: execZRevRank, Scope: ScopeRead},
 }
 
 // handleFrame is the transport.Handler registered with the TCP server.
@@ -110,17 +128,22 @@ func (m *Cluster) dispatch(op transport.Op, key string, args ...[]byte) ([][]byt
 
 	case ScopeWrite:
 		req := transport.ForwardRequest{Op: op, Key: key, Args: args}
+		var result [][]byte
 		if len(nodes) == 0 || m.cfg.NodeID == nodes[0] {
-			if _, err := def.Exec(m, key, args); err != nil {
+			var err error
+			result, err = def.Exec(m, key, args)
+			if err != nil {
 				return nil, err
 			}
 		} else {
-			if _, err := m.sendReq(nodes[0], req); err != nil {
+			resp, err := m.sendReq(nodes[0], req)
+			if err != nil {
 				return nil, err
 			}
+			result = resp.Results
 		}
 		m.fanOutReplicas(req, nodes[1:])
-		return nil, nil
+		return result, nil
 
 	case ScopeLocal:
 		return def.Exec(m, key, args)
@@ -145,7 +168,7 @@ func (m *Cluster) fanOutReplicas(req transport.ForwardRequest, nodes []string) {
 				return
 			}
 			if _, err := m.sendReq(nodeID, req); err != nil {
-				m.handlePeerError(nodeID)
+				m.markDead(nodeID)
 			}
 		}()
 	}
@@ -178,8 +201,4 @@ func (m *Cluster) sendReq(nodeID string, req transport.ForwardRequest) (transpor
 // It delegates to dispatch, keeping routing logic internal to this package.
 func (m *Cluster) Exec(op transport.Op, key string, args ...[]byte) ([][]byte, error) {
 	return m.dispatch(op, key, args...)
-}
-
-func (m *Cluster) handlePeerError(nodeID string) {
-	m.markDead(nodeID)
 }

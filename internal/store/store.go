@@ -2,11 +2,17 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ErrCapacityExceeded is returned by write operations when the node has reached
+// its configured memory limit. Add more nodes to the cluster to increase capacity.
+var ErrCapacityExceeded = errors.New("hive: node memory limit reached")
 
 // Kind identifies the type of data structure stored under a key.
 type Kind uint8
@@ -15,6 +21,8 @@ const (
 	KindValue Kind = iota
 	KindSet
 	KindHash
+	KindList
+	KindZSet
 )
 
 // DecodeFunc deserializes a DataStructure from bytes produced by its Encode method.
@@ -34,9 +42,47 @@ type DataStructure interface {
 	// SetKeyExpiry sets the key-level expiry as a Unix timestamp in seconds.
 	// Pass 0 to clear the expiry.
 	SetKeyExpiry(unixSec int64)
+	// ByteSize returns the estimated in-memory byte cost of this value (excluding
+	// the key and per-entry overhead, which are added by the DataStore).
+	ByteSize() int64
+	// WriteAt returns the Unix nanosecond timestamp of the last write.
+	// Used by ApplyIfNewer to resolve rebalance conflicts (LWW).
+	WriteAt() int64
+	// cachedSize / setCachedSize / setWriteAt are package-internal bookkeeping.
+	cachedSize() int64
+	setCachedSize(int64)
+	setWriteAt(int64)
 }
 
+// sizeBase holds the cached byte cost for a stored entry. Embed it in each
+// concrete DataStructure type to satisfy the unexported interface methods above.
+type sizeBase struct {
+	size int64
+}
+
+func (b *sizeBase) cachedSize() int64     { return b.size }
+func (b *sizeBase) setCachedSize(n int64) { b.size = n }
+
+// writeAtBase holds the last-write timestamp for LWW conflict resolution.
+// Embed it in each concrete DataStructure type alongside sizeBase.
+type writeAtBase struct {
+	writeAt int64
+}
+
+func (b *writeAtBase) WriteAt() int64     { return b.writeAt }
+func (b *writeAtBase) setWriteAt(t int64) { b.writeAt = t }
+
 // -- DataStore --
+
+// Byte-size constants for struct fields shared across all DataStructure types.
+const (
+	entryOverhead    = 64 // per-entry cost added to ByteSize() to account for the map bucket allocation
+	writeAtSize      = 8  // writeAtBase.writeAt int64
+	keyExpirySize    = 8  // key-level expiresAt int64
+	mapEntryOverhead = 16 // per-item cost in member/field maps: int64 expiry (8) + map bucket (8)
+	sliceItemOverhead = 24 // per-element cost in [][]byte slices: slice header (pointer+len+cap = 24)
+	zsetEntryOverhead = 32 // per-member cost in sorted []zsetEntry: string header (16) + float64 (8) + padding (8)
+)
 
 type shard struct {
 	mu   sync.RWMutex
@@ -47,29 +93,27 @@ type shard struct {
 type DataStore struct {
 	shards      []*shard
 	shardsCount uint64
-	janitor     *janitor
+	used        atomic.Int64 // global byte estimate across all shards
+	capacity    int64        // global byte cap; 0 = unlimited, read-only after init
 	decoders    map[Kind]DecodeFunc
 }
 
-func NewDataStore(cleanupInterval time.Duration) *DataStore {
+func NewDataStore(memLimit uint64) *DataStore {
 	n := shardCount()
 	ds := &DataStore{
 		shards:      make([]*shard, n),
 		shardsCount: n,
+		capacity:    int64(memLimit),
 		decoders: map[Kind]DecodeFunc{
-			KindValue: func(data []byte) (DataStructure, error) { return NewValueStructure(data), nil },
+			KindValue: func(data []byte) (DataStructure, error) { return DecodeValueStructure(data) },
 			KindSet:   func(data []byte) (DataStructure, error) { return DecodeSetStructure(data) },
 			KindHash:  func(data []byte) (DataStructure, error) { return DecodeHashStructure(data) },
+			KindList:  func(data []byte) (DataStructure, error) { return DecodeListStructure(data) },
+			KindZSet:  func(data []byte) (DataStructure, error) { return DecodeZSetStructure(data) },
 		},
 	}
 	for i := range n {
 		ds.shards[i] = &shard{data: make(map[string]DataStructure)}
-	}
-	if cleanupInterval > 0 {
-		j := &janitor{interval: cleanupInterval, stop: make(chan struct{})}
-		ds.janitor = j
-		go j.run(ds)
-		runtime.SetFinalizer(ds, stopJanitor)
 	}
 	return ds
 }
@@ -98,6 +142,43 @@ func (ds *DataStore) getShard(key string) *shard {
 	return ds.shards[h&(ds.shardsCount-1)]
 }
 
+// removeEntry removes key from s, decrementing the global used counter.
+// Must be called with s's write lock held.
+func (ds *DataStore) removeEntry(s *shard, key string) {
+	e, ok := s.data[key]
+	if !ok {
+		return
+	}
+	ds.used.Add(-e.cachedSize())
+	delete(s.data, key)
+}
+
+// upsertEntry inserts or replaces key in s, updating the global used counter.
+// Returns ErrCapacityExceeded if the write would push used above capacity.
+// Overwrites that reduce or maintain entry size always succeed.
+// Must be called with s's write lock held.
+func (ds *DataStore) upsertEntry(s *shard, key string, e DataStructure) error {
+	size := int64(len(key)) + e.ByteSize() + entryOverhead
+
+	if old, ok := s.data[key]; ok {
+		delta := size - old.cachedSize()
+		if delta > 0 && ds.capacity > 0 && ds.used.Load()+delta > ds.capacity {
+			return ErrCapacityExceeded
+		}
+		ds.used.Add(delta)
+	} else {
+		if ds.capacity > 0 && ds.used.Load()+size > ds.capacity {
+			return ErrCapacityExceeded
+		}
+		ds.used.Add(size)
+	}
+
+	e.setWriteAt(time.Now().UnixNano())
+	e.setCachedSize(size)
+	s.data[key] = e
+	return nil
+}
+
 func (ds *DataStore) Get(key string) (DataStructure, bool) {
 	s := ds.getShard(key)
 	s.mu.RLock()
@@ -113,17 +194,18 @@ func (ds *DataStore) Get(key string) (DataStructure, bool) {
 	return e, true
 }
 
-func (ds *DataStore) Set(key string, e DataStructure) {
+func (ds *DataStore) Set(key string, e DataStructure) error {
 	s := ds.getShard(key)
 	s.mu.Lock()
-	s.data[key] = e
+	err := ds.upsertEntry(s, key, e)
 	s.mu.Unlock()
+	return err
 }
 
 func (ds *DataStore) Del(key string) {
 	s := ds.getShard(key)
 	s.mu.Lock()
-	delete(s.data, key)
+	ds.removeEntry(s, key)
 	s.mu.Unlock()
 }
 
@@ -145,11 +227,12 @@ func (ds *DataStore) Expire(key string, ttl time.Duration) bool {
 
 // Read runs fn under the shard read lock for key.
 // fn is only called if the key exists and has not expired.
-// Multiple readers can proceed concurrently; fn must not block or write.
+// fn must not block or write.
 func (ds *DataStore) Read(key string, fn func(DataStructure)) {
 	s := ds.getShard(key)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	e, ok := s.data[key]
 	if !ok {
 		return
@@ -172,10 +255,41 @@ func (ds *DataStore) Apply(key string, fn func(DataStructure) (DataStructure, er
 		return err
 	}
 	if next == nil {
-		delete(s.data, key)
-	} else {
-		s.data[key] = next
+		ds.removeEntry(s, key)
+		return nil
 	}
+	return ds.upsertEntry(s, key, next)
+}
+
+// ApplyIfNewer stores incoming only when its WriteAt exceeds the currently
+// stored entry's WriteAt (or no entry exists). Last-Write-Wins conflict
+// resolution for rebalancing keys written on both sides of a network partition.
+func (ds *DataStore) ApplyIfNewer(key string, incoming DataStructure) error {
+	s := ds.getShard(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, exists := s.data[key]
+	if exists && existing.WriteAt() >= incoming.WriteAt() {
+		return nil
+	}
+
+	size := int64(len(key)) + incoming.ByteSize() + entryOverhead
+	if exists {
+		delta := size - existing.cachedSize()
+		if delta > 0 && ds.capacity > 0 && ds.used.Load()+delta > ds.capacity {
+			return ErrCapacityExceeded
+		}
+		ds.used.Add(delta)
+	} else {
+		if ds.capacity > 0 && ds.used.Load()+size > ds.capacity {
+			return ErrCapacityExceeded
+		}
+		ds.used.Add(size)
+	}
+
+	incoming.setCachedSize(size)
+	s.data[key] = incoming
 	return nil
 }
 
@@ -205,12 +319,6 @@ func (ds *DataStore) Scan(cursor, count int, fn func(key string, e DataStructure
 	}
 }
 
-func (ds *DataStore) Stop() {
-	if ds.janitor != nil {
-		ds.janitor.stop <- struct{}{}
-	}
-}
-
 // shardCount returns the next power of 2 >= NumCPU*4.
 func shardCount() uint64 {
 	n := runtime.NumCPU() * 4
@@ -227,49 +335,24 @@ func shardCount() uint64 {
 	return uint64(n)
 }
 
-// -- janitor --
-
-type janitor struct {
-	interval time.Duration
-	stop     chan struct{}
-}
-
-func (j *janitor) run(ds *DataStore) {
-	ticker := time.NewTicker(j.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			ds.deleteExpired()
-		case <-j.stop:
-			return
-		}
-	}
-}
-
-func (ds *DataStore) deleteExpired() {
+// DeleteExpired sweeps all shards, removing entries whose key-level TTL has
+// elapsed and sub-structures (sets, hashes) whose all members have expired.
+// Called by the cluster janitor on each cleanup tick.
+func (ds *DataStore) DeleteExpired() {
 	now := time.Now()
 	nowUnix := now.Unix()
 	for i := range ds.shardsCount {
 		s := ds.shards[i]
 		s.mu.Lock()
 		for key, e := range s.data {
-			// Phase 1: key-level TTL — always evicts the whole entry.
 			if exp := e.KeyExpiry(); exp != 0 && nowUnix >= exp {
-				delete(s.data, key)
+				ds.removeEntry(s, key)
 				continue
 			}
-			// Phase 2: field-level cleanup (Sets, Hashes).
-			// Cleanup removes expired sub-fields and returns true if the
-			// structure is now empty and should itself be deleted.
 			if e.Cleanup(now) {
-				delete(s.data, key)
+				ds.removeEntry(s, key)
 			}
 		}
 		s.mu.Unlock()
 	}
-}
-
-func stopJanitor(ds *DataStore) {
-	ds.janitor.stop <- struct{}{}
 }
