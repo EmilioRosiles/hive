@@ -32,7 +32,7 @@ func totalEntries(ds *DataStore) int {
 
 // entrySize returns the accounting cost for key + value string v.
 func entrySize(key, v string) int64 {
-	return int64(len(key)) + int64(len(v)) + entryOverhead
+	return int64(len(key)) + int64(len(v)) + writeAtSize + keyExpirySize + entryOverhead
 }
 
 // -- Set / Get --
@@ -385,5 +385,114 @@ func TestDeleteExpiredRemovesEmptySet(t *testing.T) {
 
 	if _, ok := ds.Get("s"); ok {
 		t.Error("DeleteExpired: set with all-expired members should be removed")
+	}
+}
+
+// -- ApplyIfNewer --
+
+func TestApplyIfNewer_NoExisting_Stores(t *testing.T) {
+	ds := NewDataStore(0)
+	v := val("hello")
+	v.setWriteAt(time.Now().UnixNano())
+
+	if err := ds.ApplyIfNewer("k", v); err != nil {
+		t.Fatalf("ApplyIfNewer: %v", err)
+	}
+	if _, ok := ds.Get("k"); !ok {
+		t.Error("ApplyIfNewer: key should be present when no existing entry")
+	}
+}
+
+func TestApplyIfNewer_NewerWins(t *testing.T) {
+	ds := NewDataStore(0)
+	mustSet(t, ds, "k", val("old"))
+
+	newer := val("new")
+	newer.setWriteAt(time.Now().UnixNano() + int64(time.Hour))
+
+	if err := ds.ApplyIfNewer("k", newer); err != nil {
+		t.Fatalf("ApplyIfNewer: %v", err)
+	}
+	e, _ := ds.Get("k")
+	if string(e.(*ValueStructure).Data) != "new" {
+		t.Errorf("newer entry should win; got %q", e.(*ValueStructure).Data)
+	}
+}
+
+func TestApplyIfNewer_OlderLoses(t *testing.T) {
+	ds := NewDataStore(0)
+	mustSet(t, ds, "k", val("current"))
+
+	stale := val("stale")
+	stale.setWriteAt(1) // nanosecond 1 — older than any real write
+
+	if err := ds.ApplyIfNewer("k", stale); err != nil {
+		t.Fatalf("ApplyIfNewer: %v", err)
+	}
+	e, _ := ds.Get("k")
+	if string(e.(*ValueStructure).Data) != "current" {
+		t.Errorf("stale entry should not overwrite; got %q", e.(*ValueStructure).Data)
+	}
+}
+
+func TestApplyIfNewer_SameTimestamp_KeepsExisting(t *testing.T) {
+	ds := NewDataStore(0)
+	mustSet(t, ds, "k", val("first"))
+
+	existing, _ := ds.Get("k")
+	ts := existing.WriteAt()
+
+	second := val("second")
+	second.setWriteAt(ts) // identical timestamp
+
+	ds.ApplyIfNewer("k", second) //nolint
+	e, _ := ds.Get("k")
+	if string(e.(*ValueStructure).Data) != "first" {
+		t.Errorf("same-timestamp should keep existing; got %q", e.(*ValueStructure).Data)
+	}
+}
+
+func TestApplyIfNewer_UsedAccountingNewKey(t *testing.T) {
+	ds := NewDataStore(0)
+	v := val("hello")
+	v.setWriteAt(time.Now().UnixNano())
+
+	ds.ApplyIfNewer("k", v) //nolint
+	want := entrySize("k", "hello")
+	if got := ds.used.Load(); got != want {
+		t.Errorf("used after ApplyIfNewer insert: got %d, want %d", got, want)
+	}
+}
+
+func TestApplyIfNewer_UsedAccountingReplace(t *testing.T) {
+	ds := NewDataStore(0)
+	mustSet(t, ds, "k", val("short"))
+
+	longer := val("much-longer")
+	longer.setWriteAt(time.Now().UnixNano() + int64(time.Hour))
+
+	ds.ApplyIfNewer("k", longer) //nolint
+	want := entrySize("k", "much-longer")
+	if got := ds.used.Load(); got != want {
+		t.Errorf("used after ApplyIfNewer replace: got %d, want %d", got, want)
+	}
+}
+
+func TestApplyIfNewer_CapacityEnforced(t *testing.T) {
+	key := "k"
+	ds := NewDataStore(uint64(entrySize(key, "v")))
+	mustSet(t, ds, key, val("v"))
+
+	// A newer but larger value must be rejected when over capacity.
+	big := val("this-value-is-too-large")
+	big.setWriteAt(time.Now().UnixNano() + int64(time.Hour))
+
+	if err := ds.ApplyIfNewer(key, big); !errors.Is(err, ErrCapacityExceeded) {
+		t.Errorf("expected ErrCapacityExceeded, got %v", err)
+	}
+	// Original value must be intact.
+	e, _ := ds.Get(key)
+	if string(e.(*ValueStructure).Data) != "v" {
+		t.Errorf("original value corrupted after rejected ApplyIfNewer: got %q", e.(*ValueStructure).Data)
 	}
 }

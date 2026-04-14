@@ -43,10 +43,13 @@ type DataStructure interface {
 	// ByteSize returns the estimated in-memory byte cost of this value (excluding
 	// the key and per-entry overhead, which are added by the DataStore).
 	ByteSize() int64
-	// cachedSize / setCachedSize are package-internal bookkeeping used to track
-	// each entry's contribution to the global used counter.
+	// WriteAt returns the Unix nanosecond timestamp of the last write.
+	// Used by ApplyIfNewer to resolve rebalance conflicts (LWW).
+	WriteAt() int64
+	// cachedSize / setCachedSize / setWriteAt are package-internal bookkeeping.
 	cachedSize() int64
 	setCachedSize(int64)
+	setWriteAt(int64)
 }
 
 // sizeBase holds the cached byte cost for a stored entry. Embed it in each
@@ -58,12 +61,24 @@ type sizeBase struct {
 func (b *sizeBase) cachedSize() int64     { return b.size }
 func (b *sizeBase) setCachedSize(n int64) { b.size = n }
 
+// writeAtBase holds the last-write timestamp for LWW conflict resolution.
+// Embed it in each concrete DataStructure type alongside sizeBase.
+type writeAtBase struct {
+	writeAt int64
+}
+
+func (b *writeAtBase) WriteAt() int64     { return b.writeAt }
+func (b *writeAtBase) setWriteAt(t int64) { b.writeAt = t }
+
 // -- DataStore --
 
-// entryOverhead is the fixed per-entry cost added to ByteSize() to account for
-// the map bucket allocation. It does not need to be exact — the goal is accurate
-// capacity enforcement, not byte-perfect accounting.
-const entryOverhead = 64
+// Byte-size constants for struct fields shared across all DataStructure types.
+const (
+	entryOverhead    = 64 // per-entry cost added to ByteSize() to account for the map bucket allocation
+	writeAtSize      = 8  // writeAtBase.writeAt int64
+	keyExpirySize    = 8  // key-level expiresAt int64
+	mapEntryOverhead = 16 // per-item cost in member/field maps: int64 expiry (8) + map bucket (8)
+)
 
 type shard struct {
 	mu   sync.RWMutex
@@ -86,7 +101,7 @@ func NewDataStore(memLimit uint64) *DataStore {
 		shardsCount: n,
 		capacity:    int64(memLimit),
 		decoders: map[Kind]DecodeFunc{
-			KindValue: func(data []byte) (DataStructure, error) { return NewValueStructure(data), nil },
+			KindValue: func(data []byte) (DataStructure, error) { return DecodeValueStructure(data) },
 			KindSet:   func(data []byte) (DataStructure, error) { return DecodeSetStructure(data) },
 			KindHash:  func(data []byte) (DataStructure, error) { return DecodeHashStructure(data) },
 		},
@@ -152,6 +167,7 @@ func (ds *DataStore) upsertEntry(s *shard, key string, e DataStructure) error {
 		ds.used.Add(size)
 	}
 
+	e.setWriteAt(time.Now().UnixNano())
 	e.setCachedSize(size)
 	s.data[key] = e
 	return nil
@@ -239,6 +255,38 @@ func (ds *DataStore) Apply(key string, fn func(DataStructure) (DataStructure, er
 	return ds.upsertEntry(s, key, next)
 }
 
+// ApplyIfNewer stores incoming only when its WriteAt exceeds the currently
+// stored entry's WriteAt (or no entry exists). Last-Write-Wins conflict
+// resolution for rebalancing keys written on both sides of a network partition.
+func (ds *DataStore) ApplyIfNewer(key string, incoming DataStructure) error {
+	s := ds.getShard(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, exists := s.data[key]
+	if exists && existing.WriteAt() >= incoming.WriteAt() {
+		return nil
+	}
+
+	size := int64(len(key)) + incoming.ByteSize() + entryOverhead
+	if exists {
+		delta := size - existing.cachedSize()
+		if delta > 0 && ds.capacity > 0 && ds.used.Load()+delta > ds.capacity {
+			return ErrCapacityExceeded
+		}
+		ds.used.Add(delta)
+	} else {
+		if ds.capacity > 0 && ds.used.Load()+size > ds.capacity {
+			return ErrCapacityExceeded
+		}
+		ds.used.Add(size)
+	}
+
+	incoming.setCachedSize(size)
+	s.data[key] = incoming
+	return nil
+}
+
 // Scan iterates over all live (non-expired) entries. Pass cursor=-1 to scan all shards.
 func (ds *DataStore) Scan(cursor, count int, fn func(key string, e DataStructure)) {
 	now := time.Now().Unix()
@@ -264,7 +312,6 @@ func (ds *DataStore) Scan(cursor, count int, fn func(key string, e DataStructure
 		s.mu.RUnlock()
 	}
 }
-
 
 // shardCount returns the next power of 2 >= NumCPU*4.
 func shardCount() uint64 {
@@ -303,4 +350,3 @@ func (ds *DataStore) DeleteExpired() {
 		s.mu.Unlock()
 	}
 }
-

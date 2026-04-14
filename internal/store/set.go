@@ -10,6 +10,7 @@ import (
 // The shard lock in DataStore protects all field access — no internal lock needed.
 type SetStructure struct {
 	sizeBase
+	writeAtBase
 	members   map[string]int64 // member → expiresAt unix nanoseconds, 0 = no expiry
 	expiresAt int64            // key-level expiry, unix seconds, 0 = no expiry
 }
@@ -25,9 +26,9 @@ func (s *SetStructure) SetKeyExpiry(t int64) { s.expiresAt = t }
 func (s *SetStructure) ByteSize() int64 {
 	var n int64
 	for m := range s.members {
-		n += int64(len(m)) + 16 // member string + int64 expiry + map overhead
+		n += int64(len(m)) + mapEntryOverhead
 	}
-	return n
+	return n + writeAtSize + keyExpirySize
 }
 
 // Add adds a member with no expiry. If the member already exists its TTL is cleared.
@@ -103,10 +104,11 @@ func (s *SetStructure) Cleanup(now time.Time) bool {
 type wireSet struct {
 	Members   map[string]int64 `msgpack:"m"`
 	ExpiresAt int64            `msgpack:"e"`
+	WriteAt   int64            `msgpack:"wa"`
 }
 
 func (s *SetStructure) Encode() ([]byte, error) {
-	return msgpack.Marshal(wireSet{Members: s.members, ExpiresAt: s.expiresAt})
+	return msgpack.Marshal(wireSet{Members: s.members, ExpiresAt: s.expiresAt, WriteAt: s.writeAt})
 }
 
 func DecodeSetStructure(data []byte) (*SetStructure, error) {
@@ -117,5 +119,7 @@ func DecodeSetStructure(data []byte) (*SetStructure, error) {
 	if w.Members == nil {
 		w.Members = make(map[string]int64)
 	}
-	return &SetStructure{members: w.Members, expiresAt: w.ExpiresAt}, nil
+	ss := &SetStructure{members: w.Members, expiresAt: w.ExpiresAt}
+	ss.writeAt = w.WriteAt
+	return ss, nil
 }
