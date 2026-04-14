@@ -91,9 +91,11 @@ Multiple stores can share the same node — they are namespaced views over the s
 ```go
 cache := node.Cache()
 
-sessions := hive.NewValueStore[Session](cache, "sessions")
-online   := hive.NewSetStore(cache, "online_users")
-streams  := hive.NewHashStore[Stream](cache, "streams")
+sessions  := hive.NewValueStore[Session](cache, "sessions")
+online    := hive.NewSetStore(cache, "online_users")
+streams   := hive.NewHashStore[Stream](cache, "streams")
+queue     := hive.NewListStore[Task](cache, "work_queue")
+scores    := hive.NewZSetStore(cache, "leaderboard")
 ```
 
 Each store type maps to a Redis-style API.
@@ -188,6 +190,81 @@ streams.Del("user:123")
 streams.Expire("user:123", 1*time.Hour)
 ```
 
+### ListStore[T]
+
+A typed distributed ordered list. Elements are msgpack-encoded. Supports efficient push/pop from both ends, making it suitable for queues, stacks, and activity feeds.
+
+```go
+type Task struct {
+    ID      string
+    Payload []byte
+}
+
+queue := hive.NewListStore[Task](cache, "work_queue")
+
+// RPush appends to the tail. LPush prepends to the head.
+queue.RPush("jobs", Task{ID: "t1", Payload: data})
+queue.LPush("jobs", Task{ID: "t0", Payload: data})
+
+// LPop removes and returns the head. RPop removes and returns the tail.
+task, err := queue.LPop("jobs")
+
+// LLen returns the number of elements.
+n, err := queue.LLen("jobs")
+
+// LIndex returns the element at index. Negative indices count from the tail.
+last, err := queue.LIndex("jobs", -1)
+
+// LRange returns a slice from start to stop inclusive. Negative indices supported.
+page, err := queue.LRange("jobs", 0, 9)
+
+// LSet overwrites the element at index.
+queue.LSet("jobs", 0, Task{ID: "t0-updated"})
+
+// Del removes the entire list. Expire sets a key-level TTL.
+queue.Del("jobs")
+queue.Expire("jobs", 1*time.Hour)
+```
+
+### ZSetStore
+
+A distributed sorted set. Each member is a unique string associated with a float64 score. Members are always kept in ascending score order, with ties broken lexicographically.
+
+```go
+scores := hive.NewZSetStore(cache, "leaderboard")
+
+// ZAdd inserts or updates member with score.
+scores.ZAdd("game:1", 9500.0, "alice")
+scores.ZAdd("game:1", 8200.0, "bob")
+
+// ZScore returns the score for a member. Errors if member does not exist.
+s, err := scores.ZScore("game:1", "alice")
+
+// ZRank returns the 0-based rank in ascending order (lowest score = 0).
+// ZRevRank returns the rank in descending order (highest score = 0).
+rank, err := scores.ZRank("game:1", "bob")
+rank, err  = scores.ZRevRank("game:1", "alice")
+
+// ZCard returns the number of members.
+n, err := scores.ZCard("game:1")
+
+// ZRange returns members from rank start to stop inclusive.
+// Negative indices count from the top (highest rank).
+top3, err := scores.ZRange("game:1", -3, -1)
+
+// ZRangeByScore returns all members with min <= score <= max in ascending order.
+mid, err := scores.ZRangeByScore("game:1", 8000.0, 9000.0)
+
+// ZRem removes a member.
+scores.ZRem("game:1", "bob")
+
+// Del removes the entire sorted set. Expire sets a key-level TTL.
+scores.Del("game:1")
+scores.Expire("game:1", 24*time.Hour)
+```
+
+`ZRange` and `ZRangeByScore` return `[]ZSetEntry`, where each entry has `Member string` and `Score float64`.
+
 ## TTL behavior
 
 All stores support two levels of TTL:
@@ -224,8 +301,9 @@ hive.Config{
     ReplicationFactor int
 
     // Maximum memory this node intends to use, in bytes.
-    // Used to compute the node's virtual node count on the hash ring —
-    // nodes with more memory receive proportionally more keyspace.
+    // Controls two things: capacity enforcement (writes are rejected once the
+    // limit is reached) and keyspace allocation (nodes with more memory receive
+    // proportionally more vnodes on the hash ring, and therefore more keys).
     // Default: total system memory
     MemLimit uint64
 
@@ -242,10 +320,10 @@ hive.Config{
     // Default: 500ms
     RebalanceDebounce time.Duration
 
-    // How long a peer can be unreachable before it is removed from the ring
-    // and its keys redistributed.
-    // Default: 10s
-    DeadTimeout time.Duration
+    // How often the cluster janitor runs to evict expired store entries
+    // and remove dead peer tombstones from the membership table.
+    // Default: 30s
+    CleanupInterval time.Duration
 
     // Verbosity of internal log output written to stderr.
     // nil defaults to slog.LevelError (quiet).
@@ -260,10 +338,10 @@ Hive is an **ephemeral, eventually consistent** cache.
 
 - Reads and writes go to the key's primary owner as determined by consistent hashing
 - Replication is asynchronous — replicas may be briefly behind the primary
-- If two partitioned sub-clusters both accept writes to the same key and later merge, the last rebalance wins (determined by ring ownership after the merge, not by write timestamp)
+- When a network partition heals and keys are redistributed, Hive uses **last-write-wins (LWW)** conflict resolution: every stored entry carries a nanosecond-precision write timestamp (`writeAt`), and rebalance only overwrites a local copy if the incoming entry is strictly newer. This prevents split-brain partitions from silently clobbering fresher data.
 - There is no durability — a node restart loses its local data. Surviving replicas retain their copies
 
-This makes Hive well-suited for session caches, rate-limit counters, presence tracking, stream limits, and other short-lived shared state where occasional staleness is acceptable.
+This makes Hive well-suited for session caches, rate-limit counters, presence tracking, leaderboards, job queues, and other short-lived shared state where occasional staleness is acceptable.
 
 ## Data types
 
@@ -271,6 +349,31 @@ Values must be serializable by [`msgpack`](https://github.com/vmihailenco/msgpac
 
 - All fields you want preserved must be **exported**
 - Pointers, slices, maps, and structs are all supported
+
+## Architecture notes
+
+### Gossip and failure detection
+
+Membership state is propagated using a gossip protocol. Every node periodically sends its view of the cluster to a random subset of peers (`GossipFanout`). Each outgoing heartbeat carries an **incarnation number** — a monotonically increasing counter seeded with the current Unix timestamp when the node starts. Seeding from wall time means a restarted node's first heartbeat carries a higher incarnation than any stale dead rumor about it, allowing it to rejoin without manual intervention.
+
+A peer's state is updated only when the incoming incarnation is strictly higher than what is locally known. This prevents stale gossip from overwriting fresh state and avoids the clock-skew problems that arise from comparing wall-clock timestamps directly across machines.
+
+Nodes that fail to respond to a heartbeat are marked dead immediately. Their keys are redistributed after `RebalanceDebounce` to allow the cluster to stabilize before migrating data.
+
+### Virtual nodes and memory-proportional keyspace
+
+The hash ring uses virtual nodes (vnodes) to distribute keyspace. Each node's vnode count is derived from its `MemLimit` relative to the rest of the cluster: a node with twice the memory of its peers owns roughly twice as much keyspace. This means data naturally flows toward nodes with more capacity without any manual weighting.
+
+### Janitor
+
+A background janitor runs every `CleanupInterval` and performs two tasks:
+
+1. **Expired entry eviction** — scans the local store and removes entries whose TTL has elapsed
+2. **Tombstone cleanup** — removes dead peer records from the membership table once they are no longer needed for gossip convergence
+
+### Split-brain recovery
+
+Each stored entry carries a `writeAt` timestamp (Unix nanoseconds, set at the time of the write). When rebalancing after a partition heals, incoming entries are written only if their `writeAt` is strictly newer than the local copy. This last-write-wins strategy ensures the most recently written value survives without requiring coordination between nodes.
 
 ## Operational notes
 
@@ -280,7 +383,9 @@ Values must be serializable by [`msgpack`](https://github.com/vmihailenco/msgpac
 
 **Replication factor** — keep it ≤ the minimum expected cluster size. A factor of 2 with a 2-node cluster means every node holds every key.
 
-**Graceful shutdown** — calling `node.Shutdown()` announces the departure to peers so they can redistribute keys immediately rather than waiting for `DeadTimeout`.
+**Graceful shutdown** — calling `node.Shutdown()` announces the departure to peers so they can redistribute keys immediately.
+
+**Memory limits** — `MemLimit` affects both write rejection and ring weight. Nodes that exceed their limit return an error on write; they do not evict existing entries to make room. Use TTLs on keys that should not accumulate indefinitely.
 
 ## License
 
