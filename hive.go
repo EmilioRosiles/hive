@@ -24,11 +24,9 @@ package hive
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/EmilioRosiles/hive/internal/cluster"
 	"github.com/EmilioRosiles/hive/internal/transport"
@@ -126,15 +124,6 @@ type Cache struct {
 // Store files call this directly — no intermediate Manager methods.
 func (c *Cache) exec(op transport.Op, key string, args ...[]byte) ([][]byte, error) {
 	return c.cluster.Exec(op, key, args...)
-}
-
-// encodeTTL encodes a TTL as a big-endian uint64 nanosecond byte slice.
-// Returns nil for zero (no expiry) — the exec layer treats an absent slot as 0.
-func encodeTTL(ttl time.Duration) []byte {
-	if ttl == 0 {
-		return nil
-	}
-	return binary.BigEndian.AppendUint64(nil, uint64(ttl.Nanoseconds()))
 }
 
 func randomID() (string, error) {

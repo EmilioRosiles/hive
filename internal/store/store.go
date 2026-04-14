@@ -21,6 +21,8 @@ const (
 	KindValue Kind = iota
 	KindSet
 	KindHash
+	KindList
+	KindZSet
 )
 
 // DecodeFunc deserializes a DataStructure from bytes produced by its Encode method.
@@ -78,6 +80,8 @@ const (
 	writeAtSize      = 8  // writeAtBase.writeAt int64
 	keyExpirySize    = 8  // key-level expiresAt int64
 	mapEntryOverhead = 16 // per-item cost in member/field maps: int64 expiry (8) + map bucket (8)
+	sliceItemOverhead = 24 // per-element cost in [][]byte slices: slice header (pointer+len+cap = 24)
+	zsetEntryOverhead = 32 // per-member cost in sorted []zsetEntry: string header (16) + float64 (8) + padding (8)
 )
 
 type shard struct {
@@ -104,6 +108,8 @@ func NewDataStore(memLimit uint64) *DataStore {
 			KindValue: func(data []byte) (DataStructure, error) { return DecodeValueStructure(data) },
 			KindSet:   func(data []byte) (DataStructure, error) { return DecodeSetStructure(data) },
 			KindHash:  func(data []byte) (DataStructure, error) { return DecodeHashStructure(data) },
+			KindList:  func(data []byte) (DataStructure, error) { return DecodeListStructure(data) },
+			KindZSet:  func(data []byte) (DataStructure, error) { return DecodeZSetStructure(data) },
 		},
 	}
 	for i := range n {

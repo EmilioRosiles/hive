@@ -17,3 +17,9 @@ var errNotASet = fmt.Errorf("%w: expected set", errTypeMismatch)
 
 // errNotAHash wraps errTypeMismatch with the expected kind.
 var errNotAHash = fmt.Errorf("%w: expected hash", errTypeMismatch)
+
+// errNotAList wraps errTypeMismatch with the expected kind.
+var errNotAList = fmt.Errorf("%w: expected list", errTypeMismatch)
+
+// errNotAZSet wraps errTypeMismatch with the expected kind.
+var errNotAZSet = fmt.Errorf("%w: expected zset", errTypeMismatch)

@@ -43,7 +43,8 @@ func DecodeValueStructure(data []byte) (*ValueStructure, error) {
 	if err := msgpack.Unmarshal(data, &w); err != nil {
 		return nil, err
 	}
-	vs := &ValueStructure{Data: w.Data, expiresAt: w.ExpiresAt, sizeBase: sizeBase{size: w.WriteAt}}
+	vs := &ValueStructure{Data: w.Data, expiresAt: w.ExpiresAt}
+	vs.writeAt = w.WriteAt
 	return vs, nil
 }
 

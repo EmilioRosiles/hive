@@ -73,6 +73,26 @@ const (
 	OpHGetAll      Op = 103
 	OpHKeys        Op = 104
 	OpHExpireField Op = 105
+
+	// List ops.
+	OpLPush  Op = 150
+	OpRPush  Op = 151
+	OpLPop   Op = 152
+	OpRPop   Op = 153
+	OpLLen   Op = 154
+	OpLIndex Op = 155
+	OpLRange Op = 156
+	OpLSet   Op = 157
+
+	// ZSet ops.
+	OpZAdd          Op = 170
+	OpZRem          Op = 171
+	OpZScore        Op = 172
+	OpZRank         Op = 173
+	OpZCard         Op = 174
+	OpZRange        Op = 175
+	OpZRangeByScore Op = 176
+	OpZRevRank      Op = 177
 )
 
 // ForwardRequest asks the receiving node to execute an operation locally.
