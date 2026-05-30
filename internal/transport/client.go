@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -26,25 +27,41 @@ func NewClient(addr string) *Client {
 }
 
 // Send delivers frame to the peer and returns the response.
-// On a connection failure the dead connection is discarded and the call
-// is retried once on a fresh connection before returning an error.
-func (c *Client) Send(frame Frame) (Frame, error) {
-	for attempt := range 2 {
+func (c *Client) Send(ctx context.Context, frame Frame) (Frame, error) {
+	for attempt := range 3 {
 		m, err := c.getMux()
 		if err != nil {
+			if attempt < 2 {
+				if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
+					return Frame{}, serr
+				}
+				continue
+			}
 			return Frame{}, fmt.Errorf("transport: connect to %s: %w", c.addr, err)
 		}
-		resp, err := m.send(frame)
+		resp, err := m.send(ctx, frame)
 		if err == nil {
 			return resp, nil
 		}
-		if attempt == 0 && errors.Is(err, errMuxClosed) {
+		if errors.Is(err, errMuxClosed) && attempt < 2 {
 			c.invalidate(m)
+			if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
+				return Frame{}, serr
+			}
 			continue
 		}
 		return Frame{}, err
 	}
 	return Frame{}, fmt.Errorf("transport: send to %s failed", c.addr)
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // getMux returns the live mux, dialing a new connection if needed.

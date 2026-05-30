@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -146,7 +147,7 @@ func (m *Cluster) sendRebalanceBatch(nodeID string, entries []transport.Rebalanc
 			slog.Warn("rebalance: encode batch failed", "node", nodeID, "err", err)
 			continue
 		}
-		if _, err := client.Send(transport.Frame{Type: transport.MsgRebalance, Payload: payload}); err != nil {
+		if _, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgRebalance, Payload: payload}); err != nil {
 			slog.Warn("rebalance: send failed", "node", nodeID, "err", err)
 			m.markDead(nodeID)
 			return

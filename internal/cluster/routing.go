@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
@@ -120,7 +121,9 @@ func (m *Cluster) dispatch(op transport.Op, key string, args ...[]byte) ([][]byt
 		if len(nodes) == 0 || m.cfg.NodeID == nodes[0] {
 			return def.Exec(m, key, args)
 		}
-		resp, err := m.sendReq(nodes[0], transport.ForwardRequest{Op: op, Key: key, Args: args})
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RoutingTimeout)
+		resp, err := m.sendReq(ctx, nodes[0], transport.ForwardRequest{Op: op, Key: key, Args: args})
+		cancel()
 		if err != nil {
 			return nil, err
 		}
@@ -136,7 +139,9 @@ func (m *Cluster) dispatch(op transport.Op, key string, args ...[]byte) ([][]byt
 				return nil, err
 			}
 		} else {
-			resp, err := m.sendReq(nodes[0], req)
+			ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RoutingTimeout)
+			resp, err := m.sendReq(ctx, nodes[0], req)
+			cancel()
 			if err != nil {
 				return nil, err
 			}
@@ -167,15 +172,17 @@ func (m *Cluster) fanOutReplicas(req transport.ForwardRequest, nodes []string) {
 				def.Exec(m, req.Key, req.Args)
 				return
 			}
-			if _, err := m.sendReq(nodeID, req); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RoutingTimeout)
+			if _, err := m.sendReq(ctx, nodeID, req); err != nil {
 				m.markDead(nodeID)
 			}
+			cancel()
 		}()
 	}
 }
 
 // sendReq encodes and sends a ForwardRequest to nodeID, returning the response.
-func (m *Cluster) sendReq(nodeID string, req transport.ForwardRequest) (transport.ForwardResponse, error) {
+func (m *Cluster) sendReq(ctx context.Context, nodeID string, req transport.ForwardRequest) (transport.ForwardResponse, error) {
 	client, ok := m.getClient(nodeID)
 	if !ok {
 		return transport.ForwardResponse{}, fmt.Errorf("cluster: no client for node %s", nodeID)
@@ -184,7 +191,7 @@ func (m *Cluster) sendReq(nodeID string, req transport.ForwardRequest) (transpor
 	if err != nil {
 		return transport.ForwardResponse{}, err
 	}
-	respFrame, err := client.Send(transport.Frame{Type: transport.MsgForward, Payload: framePayload})
+	respFrame, err := client.Send(ctx, transport.Frame{Type: transport.MsgForward, Payload: framePayload})
 	if err != nil {
 		return transport.ForwardResponse{}, err
 	}

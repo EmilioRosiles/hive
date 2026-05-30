@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -76,7 +77,9 @@ func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 			continue
 		}
 
-		resp, err := client.Send(frame)
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.GossipTimeout)
+		resp, err := client.Send(ctx, frame)
+		cancel()
 		if err != nil {
 			slog.Warn("gossip: heartbeat failed", "node", p.NodeID, "err", err)
 			m.markDead(p.NodeID)
@@ -106,7 +109,7 @@ func (m *Cluster) bootstrap(addr string) {
 		return
 	}
 	client := transport.NewClient(addr)
-	resp, err := client.Send(transport.Frame{Type: transport.MsgHeartbeat, Payload: payload})
+	resp, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgHeartbeat, Payload: payload})
 	if err != nil {
 		var rejected *transport.ErrRejected
 		if errors.As(err, &rejected) {
@@ -221,7 +224,7 @@ func (m *Cluster) announceLeave() {
 		go func(addr string) {
 			defer wg.Done()
 			c := transport.NewClient(addr)
-			c.Send(frame)
+			c.Send(context.Background(), frame)
 		}(p.Addr)
 	}
 	m.mu.RUnlock()

@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -44,7 +45,7 @@ func newMux(conn net.Conn) *mux {
 
 // send delivers frame to the remote peer and returns the response.
 // Multiple goroutines may call send concurrently.
-func (m *mux) send(frame Frame) (Frame, error) {
+func (m *mux) send(ctx context.Context, frame Frame) (Frame, error) {
 	id := m.nextID.Add(1)
 	frame.ID = id
 
@@ -70,6 +71,9 @@ func (m *mux) send(frame Frame) (Frame, error) {
 	case <-m.done:
 		m.pending.Delete(id)
 		return Frame{}, errMuxClosed
+	case <-ctx.Done():
+		m.pending.Delete(id)
+		return Frame{}, fmt.Errorf("mux: send: %w", ctx.Err())
 	}
 }
 

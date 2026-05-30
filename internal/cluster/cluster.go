@@ -29,10 +29,12 @@ type Config struct {
 	BindAddr          string
 	BindPort          int
 	Seeds             []string
+	RoutingTimeout    time.Duration
 	ReplicationFactor int
 	MemLimit          uint64
 	GossipInterval    time.Duration
 	GossipFanout      int
+	GossipTimeout     time.Duration
 	RebalanceDebounce time.Duration
 	CleanupInterval   time.Duration
 	Clustered         bool

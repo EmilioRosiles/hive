@@ -46,6 +46,10 @@ type Config struct {
 	// of each key. Must be <= cluster size. Defaults to 1.
 	ReplicationFactor int
 
+	// RoutingTimeout is how long this nodes waits before cancelling a
+	// routed op (redirect/replicate).
+	RoutingTimeout time.Duration
+
 	// MemLimit is the maximum memory this node intends to use, in bytes.
 	// It is used to compute the node's virtual node count on the hash ring:
 	// nodes with more memory receive proportionally more keyspace.
@@ -59,6 +63,10 @@ type Config struct {
 	// GossipFanout is how many peers receive each heartbeat round.
 	// Defaults to 3.
 	GossipFanout int
+
+	// GossipTimeout is how long this nodes waits before cancelling a heartbeat to a peer.
+	// Defaults to 300ms.
+	GossipTimeout time.Duration
 
 	// RebalanceDebounce is the delay after a topology change before
 	// rebalancing starts, to let the cluster stabilize.
@@ -81,10 +89,12 @@ func defaultConfig() Config {
 		Mode:              ModeStandalone,
 		BindAddr:          "0.0.0.0",
 		BindPort:          7946,
+		RoutingTimeout:    1 * time.Second,
 		ReplicationFactor: 1,
 		MemLimit:          sys.TotalMemory(),
-		GossipInterval:    3 * time.Second,
+		GossipInterval:    5 * time.Second,
 		GossipFanout:      3,
+		GossipTimeout:     300 * time.Millisecond,
 		RebalanceDebounce: 500 * time.Millisecond,
 		CleanupInterval:   30 * time.Second,
 	}
