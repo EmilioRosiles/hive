@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"sync"
 )
 
 // Handler processes an inbound message and returns a response payload and an
@@ -58,8 +57,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
 	r := bufio.NewReader(conn)
-	w := bufio.NewWriter(conn)
-	var encMu sync.Mutex
+	w := newFrameWriter(conn)
 
 	for {
 		frame, err := ReadFrame(r)
@@ -75,13 +73,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				slog.Warn(fmt.Sprintf("transport: handler error (type=%d): %v", f.Type, handlerErr))
 				resp.Err = handlerErr.Error()
 			}
-			encMu.Lock()
-			err := WriteFrame(w, resp)
-			if err == nil {
-				err = w.Flush()
-			}
-			encMu.Unlock()
-			if err != nil {
+			if err := w.write(resp); err != nil {
 				slog.Warn(fmt.Sprintf("transport: encode response: %v", err))
 			}
 		}(frame)

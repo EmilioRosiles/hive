@@ -212,9 +212,8 @@ func (m *Cluster) evictDeadPeers() {
 }
 
 // getPeer returns a peer by node ID. The returned *PeerInfo is the live,
-// mutable entry shared with other goroutines — callers must not read or
-// write its fields without holding m.mu themselves (see applyIncarnation for
-// the pattern). Prefer peerStatus for a simple status check.
+// mutable entry shared with other goroutines — callers must hold m.mu before
+// touching its fields. Prefer peerStatus for a simple status check.
 func (m *Cluster) getPeer(nodeID string) (*PeerInfo, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -19,14 +19,15 @@ type ErrRejected struct{ msg string }
 
 func (e *ErrRejected) Error() string { return e.msg }
 
-// mux multiplexes concurrent request/response pairs over a single TCP connection.
-// One readLoop goroutine reads all inbound frames and dispatches each response
-// to the goroutine that sent the matching request.
+// mux multiplexes concurrent request/response pairs over a single TCP
+// connection. One readLoop goroutine reads all inbound frames and routes
+// each response, by frame.ID, to the goroutine that sent the matching
+// request. Server doesn't need this: it only ever answers the specific frame
+// it just read, with nothing to correlate.
 type mux struct {
 	conn    net.Conn
-	w       *bufio.Writer
-	encMu   sync.Mutex // serializes writes; bufio.Writer is not goroutine-safe
-	pending sync.Map   // map[uint32]chan Frame
+	w       *frameWriter
+	pending sync.Map // map[uint32]chan Frame
 	nextID  atomic.Uint32
 	done    chan struct{}
 	once    sync.Once
@@ -35,7 +36,7 @@ type mux struct {
 func newMux(conn net.Conn) *mux {
 	m := &mux{
 		conn: conn,
-		w:    bufio.NewWriter(conn),
+		w:    newFrameWriter(conn),
 		done: make(chan struct{}),
 	}
 	go m.readLoop()
@@ -51,13 +52,7 @@ func (m *mux) send(ctx context.Context, frame Frame) (Frame, error) {
 	ch := make(chan Frame, 1)
 	m.pending.Store(id, ch)
 
-	m.encMu.Lock()
-	err := WriteFrame(m.w, frame)
-	if err == nil {
-		err = m.w.Flush()
-	}
-	m.encMu.Unlock()
-
+	err := m.w.write(frame)
 	if err != nil {
 		m.pending.Delete(id)
 		m.shutdown(err)

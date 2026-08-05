@@ -169,11 +169,9 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 }
 
 // applyIncarnation atomically checks whether incarnation is newer than
-// local's current value and, if so, updates it. Reading local.Incarnation and
-// writing it must happen under the same lock — local is a live pointer into
-// m.peers shared with concurrent heartbeat handlers/senders, so checking the
-// value first and locking only for the write (the previous approach) leaves
-// a window where two goroutines can race on the same field.
+// local's current value and, if so, updates it. local is a live pointer into
+// m.peers shared with concurrent goroutines, so the check and the write must
+// happen under the same lock.
 func (m *Cluster) applyIncarnation(local *PeerInfo, incarnation uint64) (status NodeStatus, applied bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

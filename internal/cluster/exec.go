@@ -6,12 +6,71 @@ import (
 	"time"
 
 	"github.com/EmilioRosiles/hive/internal/store"
+	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
 // This file contains the local execution functions for each cluster op.
 // Each function receives pre-decoded [][]byte arg slots and works directly
 // on the local store. No serialization happens here.
 // Arg slot positions are documented by the constants below.
+
+// OpScope describes how a cluster op is routed and replicated.
+type OpScope uint8
+
+const (
+	ScopeWrite OpScope = iota // route to primary owner, replicate to replicas
+	ScopeRead                 // route to primary owner, no replication
+	ScopeLocal                // always execute on the receiving node
+)
+
+// opDef pairs an op's local execution function with its routing scope.
+type opDef struct {
+	Exec  func(m *Cluster, key string, args [][]byte) ([][]byte, error)
+	Scope OpScope
+}
+
+// opRegistry maps each Op to its definition.
+// To add a new op: register it here and add its exec function below.
+// routing.go's dispatch and handleForward never need to change.
+var opRegistry = map[transport.Op]opDef{
+	transport.OpDel:    {Exec: execDel, Scope: ScopeWrite},
+	transport.OpExpire: {Exec: execExpire, Scope: ScopeWrite},
+
+	transport.OpValueSet: {Exec: execValueSet, Scope: ScopeWrite},
+	transport.OpValueGet: {Exec: execValueGet, Scope: ScopeRead},
+
+	transport.OpSAdd:          {Exec: execSAdd, Scope: ScopeWrite},
+	transport.OpSRem:          {Exec: execSRem, Scope: ScopeWrite},
+	transport.OpSIsMember:     {Exec: execSIsMember, Scope: ScopeRead},
+	transport.OpSMembers:      {Exec: execSMembers, Scope: ScopeRead},
+	transport.OpSCard:         {Exec: execSCard, Scope: ScopeRead},
+	transport.OpSExpireMember: {Exec: execSExpireMember, Scope: ScopeWrite},
+
+	transport.OpHSet:         {Exec: execHSet, Scope: ScopeWrite},
+	transport.OpHGet:         {Exec: execHGet, Scope: ScopeRead},
+	transport.OpHDel:         {Exec: execHDel, Scope: ScopeWrite},
+	transport.OpHGetAll:      {Exec: execHGetAll, Scope: ScopeRead},
+	transport.OpHKeys:        {Exec: execHKeys, Scope: ScopeRead},
+	transport.OpHExpireField: {Exec: execHExpireField, Scope: ScopeWrite},
+
+	transport.OpLPush:  {Exec: execLPush, Scope: ScopeWrite},
+	transport.OpRPush:  {Exec: execRPush, Scope: ScopeWrite},
+	transport.OpLPop:   {Exec: execLPop, Scope: ScopeWrite},
+	transport.OpRPop:   {Exec: execRPop, Scope: ScopeWrite},
+	transport.OpLLen:   {Exec: execLLen, Scope: ScopeRead},
+	transport.OpLIndex: {Exec: execLIndex, Scope: ScopeRead},
+	transport.OpLRange: {Exec: execLRange, Scope: ScopeRead},
+	transport.OpLSet:   {Exec: execLSet, Scope: ScopeWrite},
+
+	transport.OpZAdd:          {Exec: execZAdd, Scope: ScopeWrite},
+	transport.OpZRem:          {Exec: execZRem, Scope: ScopeWrite},
+	transport.OpZScore:        {Exec: execZScore, Scope: ScopeRead},
+	transport.OpZRank:         {Exec: execZRank, Scope: ScopeRead},
+	transport.OpZCard:         {Exec: execZCard, Scope: ScopeRead},
+	transport.OpZRange:        {Exec: execZRange, Scope: ScopeRead},
+	transport.OpZRangeByScore: {Exec: execZRangeByScore, Scope: ScopeRead},
+	transport.OpZRevRank:      {Exec: execZRevRank, Scope: ScopeRead},
+}
 
 // -- arg index constants --
 

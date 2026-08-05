@@ -7,11 +7,9 @@ import (
 )
 
 // Encode serializes v for wire transmission. Types that implement
-// encoding.BinaryMarshaler (ForwardRequest, ForwardResponse, RebalanceBatch —
-// see binary.go) use their hand-written fixed-layout binary encoding, which
-// avoids msgpack's reflection overhead on these high-frequency cluster-hop
-// payloads; everything else (HeartbeatRequest/Response, LeaveRequest) falls
-// back to msgpack.
+// encoding.BinaryMarshaler (ForwardRequest, ForwardResponse, RebalanceBatch)
+// use their hand-written binary encoding; everything else falls back to
+// msgpack.
 func Encode(v any) ([]byte, error) {
 	if bm, ok := v.(encoding.BinaryMarshaler); ok {
 		return bm.MarshalBinary()

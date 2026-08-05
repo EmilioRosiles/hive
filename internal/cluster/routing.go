@@ -7,64 +7,6 @@ import (
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
-// OpScope describes how a cluster op is routed and replicated.
-type OpScope uint8
-
-const (
-	ScopeWrite OpScope = iota // route to primary owner, replicate to replicas
-	ScopeRead                 // route to primary owner, no replication
-	ScopeLocal                // always execute on the receiving node
-)
-
-// opDef pairs an op's local execution function with its routing scope.
-type opDef struct {
-	Exec  func(m *Cluster, key string, args [][]byte) ([][]byte, error)
-	Scope OpScope
-}
-
-// opRegistry maps each Op to its definition.
-// To add a new op: register it here and add its exec function in exec.go.
-// dispatch and handleForward never need to change.
-var opRegistry = map[transport.Op]opDef{
-	transport.OpDel:    {Exec: execDel, Scope: ScopeWrite},
-	transport.OpExpire: {Exec: execExpire, Scope: ScopeWrite},
-
-	transport.OpValueSet: {Exec: execValueSet, Scope: ScopeWrite},
-	transport.OpValueGet: {Exec: execValueGet, Scope: ScopeRead},
-
-	transport.OpSAdd:          {Exec: execSAdd, Scope: ScopeWrite},
-	transport.OpSRem:          {Exec: execSRem, Scope: ScopeWrite},
-	transport.OpSIsMember:     {Exec: execSIsMember, Scope: ScopeRead},
-	transport.OpSMembers:      {Exec: execSMembers, Scope: ScopeRead},
-	transport.OpSCard:         {Exec: execSCard, Scope: ScopeRead},
-	transport.OpSExpireMember: {Exec: execSExpireMember, Scope: ScopeWrite},
-
-	transport.OpHSet:         {Exec: execHSet, Scope: ScopeWrite},
-	transport.OpHGet:         {Exec: execHGet, Scope: ScopeRead},
-	transport.OpHDel:         {Exec: execHDel, Scope: ScopeWrite},
-	transport.OpHGetAll:      {Exec: execHGetAll, Scope: ScopeRead},
-	transport.OpHKeys:        {Exec: execHKeys, Scope: ScopeRead},
-	transport.OpHExpireField: {Exec: execHExpireField, Scope: ScopeWrite},
-
-	transport.OpLPush:  {Exec: execLPush, Scope: ScopeWrite},
-	transport.OpRPush:  {Exec: execRPush, Scope: ScopeWrite},
-	transport.OpLPop:   {Exec: execLPop, Scope: ScopeWrite},
-	transport.OpRPop:   {Exec: execRPop, Scope: ScopeWrite},
-	transport.OpLLen:   {Exec: execLLen, Scope: ScopeRead},
-	transport.OpLIndex: {Exec: execLIndex, Scope: ScopeRead},
-	transport.OpLRange: {Exec: execLRange, Scope: ScopeRead},
-	transport.OpLSet:   {Exec: execLSet, Scope: ScopeWrite},
-
-	transport.OpZAdd:          {Exec: execZAdd, Scope: ScopeWrite},
-	transport.OpZRem:          {Exec: execZRem, Scope: ScopeWrite},
-	transport.OpZScore:        {Exec: execZScore, Scope: ScopeRead},
-	transport.OpZRank:         {Exec: execZRank, Scope: ScopeRead},
-	transport.OpZCard:         {Exec: execZCard, Scope: ScopeRead},
-	transport.OpZRange:        {Exec: execZRange, Scope: ScopeRead},
-	transport.OpZRangeByScore: {Exec: execZRangeByScore, Scope: ScopeRead},
-	transport.OpZRevRank:      {Exec: execZRevRank, Scope: ScopeRead},
-}
-
 // handleFrame is the transport.Handler registered with the TCP server.
 // It fans incoming frames out to their respective handlers.
 func (m *Cluster) handleFrame(msgType transport.MsgType, payload []byte) ([]byte, error) {
@@ -118,36 +60,15 @@ func (m *Cluster) dispatch(op transport.Op, key string, args ...[]byte) ([][]byt
 
 	switch def.Scope {
 	case ScopeRead:
-		if len(nodes) == 0 || m.cfg.NodeID == nodes[0] {
-			return def.Exec(m, key, args)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RoutingTimeout)
-		resp, err := m.sendReq(ctx, nodes[0], transport.ForwardRequest{Op: op, Key: key, Args: args})
-		cancel()
+		return m.execOrForward(def, op, key, args, nodes)
+
+	case ScopeWrite:
+		result, err := m.execOrForward(def, op, key, args, nodes)
 		if err != nil {
 			return nil, err
 		}
-		return resp.Results, nil
-
-	case ScopeWrite:
 		req := transport.ForwardRequest{Op: op, Key: key, Args: args}
-		var result [][]byte
-		if len(nodes) == 0 || m.cfg.NodeID == nodes[0] {
-			var err error
-			result, err = def.Exec(m, key, args)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RoutingTimeout)
-			resp, err := m.sendReq(ctx, nodes[0], req)
-			cancel()
-			if err != nil {
-				return nil, err
-			}
-			result = resp.Results
-		}
-		m.fanOutReplicas(req, nodes[1:])
+		m.fanOutReplicas(def, req, nodes[1:])
 		return result, nil
 
 	case ScopeLocal:
@@ -157,13 +78,28 @@ func (m *Cluster) dispatch(op transport.Op, key string, args ...[]byte) ([][]byt
 	return nil, fmt.Errorf("cluster: unhandled scope for op %d", op)
 }
 
+// execOrForward runs op locally if this node is the primary owner for key (or
+// there is no other node), otherwise forwards it to the primary and returns
+// its response.
+func (m *Cluster) execOrForward(def opDef, op transport.Op, key string, args [][]byte, nodes []string) ([][]byte, error) {
+	if len(nodes) == 0 || m.cfg.NodeID == nodes[0] {
+		return def.Exec(m, key, args)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RoutingTimeout)
+	defer cancel()
+	resp, err := m.sendForward(ctx, nodes[0], transport.ForwardRequest{Op: op, Key: key, Args: args})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Results, nil
+}
+
 // fanOutReplicas asynchronously delivers req to each node in nodes.
 // If a node is this node it executes locally (replica write); otherwise it
 // sends over the network. nodes is typically nodes[1:] from the ring so the
 // primary (nodes[0]) is never duplicated here.
-func (m *Cluster) fanOutReplicas(req transport.ForwardRequest, nodes []string) {
-	def, ok := opRegistry[req.Op]
-	if !ok || len(nodes) == 0 {
+func (m *Cluster) fanOutReplicas(def opDef, req transport.ForwardRequest, nodes []string) {
+	if len(nodes) == 0 {
 		return
 	}
 	for _, nodeID := range nodes {
@@ -173,7 +109,7 @@ func (m *Cluster) fanOutReplicas(req transport.ForwardRequest, nodes []string) {
 				return
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RoutingTimeout)
-			if _, err := m.sendReq(ctx, nodeID, req); err != nil {
+			if _, err := m.sendForward(ctx, nodeID, req); err != nil {
 				m.markDead(nodeID)
 			}
 			cancel()
@@ -181,8 +117,8 @@ func (m *Cluster) fanOutReplicas(req transport.ForwardRequest, nodes []string) {
 	}
 }
 
-// sendReq encodes and sends a ForwardRequest to nodeID, returning the response.
-func (m *Cluster) sendReq(ctx context.Context, nodeID string, req transport.ForwardRequest) (transport.ForwardResponse, error) {
+// sendForward encodes and sends a ForwardRequest to nodeID, returning the response.
+func (m *Cluster) sendForward(ctx context.Context, nodeID string, req transport.ForwardRequest) (transport.ForwardResponse, error) {
 	client, ok := m.getClient(nodeID)
 	if !ok {
 		return transport.ForwardResponse{}, fmt.Errorf("cluster: no client for node %s", nodeID)
