@@ -13,11 +13,12 @@ import (
 type MsgType uint8
 
 const (
-	MsgHeartbeat MsgType = iota + 1 // gossip state sync
-	MsgForward                      // route a command to the responsible node
-	MsgRebalance                    // bulk key migration during rebalance
-	MsgLeave                        // graceful departure announcement
-	MsgProbe                        // indirect reachability probe
+	MsgHeartbeat    MsgType = iota + 1 // gossip state sync
+	MsgForward                         // route a command to the responsible node
+	MsgForwardBatch                    // batched replication ops from a peer's replicator
+	MsgRebalance                       // bulk key migration during rebalance
+	MsgLeave                           // graceful departure announcement
+	MsgProbe                           // indirect reachability probe
 )
 
 // Frame is the envelope wrapping every message on the wire, written and read

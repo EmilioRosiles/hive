@@ -25,19 +25,22 @@ const (
 
 // Config holds all configuration for the cluster manager.
 type Config struct {
-	NodeID            string
-	BindAddr          string
-	BindPort          int
-	Seeds             []string
-	RoutingTimeout    time.Duration
-	ReplicationFactor int
-	MemLimit          uint64
-	GossipInterval    time.Duration
-	GossipFanout      int
-	GossipTimeout     time.Duration
-	RebalanceDebounce time.Duration
-	CleanupInterval   time.Duration
-	Clustered         bool
+	NodeID               string
+	BindAddr             string
+	BindPort             int
+	Seeds                []string
+	RoutingTimeout       time.Duration
+	ReplicationFactor    int
+	MemLimit             uint64
+	GossipInterval       time.Duration
+	GossipFanout         int
+	GossipTimeout        time.Duration
+	RebalanceDebounce    time.Duration
+	RebalanceBatchSize   int
+	ReplicationQueueSize int
+	ReplicationBatchSize int
+	CleanupInterval      time.Duration
+	Clustered            bool
 }
 
 // PeerInfo is the canonical peer representation used both as internal mutable
@@ -59,6 +62,7 @@ type Cluster struct {
 	store       *store.DataStore
 	peers       map[string]*PeerInfo
 	clients     map[string]*transport.Client
+	replicators map[string]*replicator
 	rebalancer  *rebalancer
 	server      *transport.Server
 	stopCh      chan struct{}
@@ -74,12 +78,13 @@ func NewCluster(cfg Config) (*Cluster, error) {
 	vNodeCount := computeVNodes(cfg.MemLimit)
 
 	m := &Cluster{
-		cfg:     cfg,
-		ring:    r,
-		store:   ds,
-		peers:   make(map[string]*PeerInfo),
-		clients: make(map[string]*transport.Client),
-		stopCh:  make(chan struct{}),
+		cfg:         cfg,
+		ring:        r,
+		store:       ds,
+		peers:       make(map[string]*PeerInfo),
+		clients:     make(map[string]*transport.Client),
+		replicators: make(map[string]*replicator),
+		stopCh:      make(chan struct{}),
 	}
 	m.incarnation.Store(uint64(time.Now().UnixNano()))
 	m.ring.Add(cfg.NodeID, vNodeCount)
@@ -147,6 +152,7 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 			p.Incarnation = ps.Incarnation
 			m.ring.Add(ps.NodeID, vNodeCount)
 			m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
+			m.replicators[ps.NodeID] = newReplicator(ps.NodeID, m)
 			go m.rebalancer.schedule()
 		}
 		return nil
@@ -162,6 +168,7 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	}
 	m.ring.Add(ps.NodeID, vNodeCount)
 	m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
+	m.replicators[ps.NodeID] = newReplicator(ps.NodeID, m)
 	go m.rebalancer.schedule()
 
 	slog.Info("cluster: added peer", "nodeID", ps.NodeID, "addr", ps.Addr)
@@ -180,6 +187,10 @@ func (m *Cluster) markDead(nodeID string) {
 	p.Status = NodeDead
 	m.ring.Remove(nodeID)
 	delete(m.clients, nodeID)
+	if rep, ok := m.replicators[nodeID]; ok {
+		rep.stop()
+		delete(m.replicators, nodeID)
+	}
 	go m.rebalancer.schedule()
 	slog.Warn("cluster: peer marked dead", "node", nodeID)
 }
@@ -239,6 +250,14 @@ func (m *Cluster) getClient(nodeID string) (*transport.Client, bool) {
 	defer m.mu.RUnlock()
 	c, ok := m.clients[nodeID]
 	return c, ok
+}
+
+// getReplicator returns the replication queue worker for a peer node ID.
+func (m *Cluster) getReplicator(nodeID string) (*replicator, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	r, ok := m.replicators[nodeID]
+	return r, ok
 }
 
 // randomAlivePeers returns up to n randomly selected alive peers.

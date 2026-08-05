@@ -59,19 +59,22 @@ func NewNode(cfg Config) (*Node, error) {
 	}
 
 	mgr, err := cluster.NewCluster(cluster.Config{
-		NodeID:            cfg.NodeID,
-		BindAddr:          cfg.BindAddr,
-		BindPort:          cfg.BindPort,
-		Seeds:             cfg.Seeds,
-		ReplicationFactor: cfg.ReplicationFactor,
-		RoutingTimeout:    cfg.RoutingTimeout,
-		MemLimit:          cfg.MemLimit,
-		GossipInterval:    cfg.GossipInterval,
-		GossipFanout:      cfg.GossipFanout,
-		GossipTimeout:     cfg.GossipTimeout,
-		RebalanceDebounce: cfg.RebalanceDebounce,
-		CleanupInterval:   cfg.CleanupInterval,
-		Clustered:         cfg.Mode == ModeCluster,
+		NodeID:               cfg.NodeID,
+		BindAddr:             cfg.BindAddr,
+		BindPort:             cfg.BindPort,
+		Seeds:                cfg.Seeds,
+		ReplicationFactor:    cfg.ReplicationFactor,
+		RoutingTimeout:       cfg.RoutingTimeout,
+		MemLimit:             cfg.MemLimit,
+		GossipInterval:       cfg.GossipInterval,
+		GossipFanout:         cfg.GossipFanout,
+		GossipTimeout:        cfg.GossipTimeout,
+		RebalanceDebounce:    cfg.RebalanceDebounce,
+		RebalanceBatchSize:   cfg.RebalanceBatchSize,
+		ReplicationQueueSize: cfg.ReplicationQueueSize,
+		ReplicationBatchSize: cfg.ReplicationBatchSize,
+		CleanupInterval:      cfg.CleanupInterval,
+		Clustered:            cfg.Mode == ModeCluster,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hive: start cluster manager: %w", err)

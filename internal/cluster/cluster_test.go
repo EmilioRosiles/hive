@@ -17,12 +17,19 @@ func newTestCluster(nodeID string) *Cluster {
 	r := ring.New(1)
 	r.Add(nodeID, defaultVNodes)
 	m := &Cluster{
-		cfg:     Config{NodeID: nodeID, ReplicationFactor: 1},
-		ring:    r,
-		store:   store.NewDataStore(0),
-		peers:   make(map[string]*PeerInfo),
-		clients: make(map[string]*transport.Client),
-		stopCh:  make(chan struct{}),
+		cfg: Config{
+			NodeID:               nodeID,
+			ReplicationFactor:    1,
+			RoutingTimeout:       time.Second,
+			ReplicationQueueSize: 64,
+			ReplicationBatchSize: 16,
+		},
+		ring:        r,
+		store:       store.NewDataStore(0),
+		peers:       make(map[string]*PeerInfo),
+		clients:     make(map[string]*transport.Client),
+		replicators: make(map[string]*replicator),
+		stopCh:      make(chan struct{}),
 	}
 	m.incarnation.Store(uint64(time.Now().UnixNano()))
 	m.rebalancer = newRebalancer(0, m)
@@ -62,6 +69,9 @@ func TestAddPeer_New(t *testing.T) {
 	if _, ok := m.getClient("peer1"); !ok {
 		t.Error("client should be registered after addPeer")
 	}
+	if _, ok := m.getReplicator("peer1"); !ok {
+		t.Error("replicator should be registered after addPeer")
+	}
 }
 
 func TestAddPeer_AlreadyAlive_NoOp(t *testing.T) {
@@ -95,6 +105,9 @@ func TestAddPeer_RevivesDead(t *testing.T) {
 	if _, ok := m.getClient("peer1"); !ok {
 		t.Error("client should be re-registered after revival")
 	}
+	if _, ok := m.getReplicator("peer1"); !ok {
+		t.Error("replicator should be re-registered after revival")
+	}
 }
 
 func TestAddPeer_ReplicationFactorMismatch(t *testing.T) {
@@ -127,6 +140,9 @@ func TestMarkDead_AlivePeer(t *testing.T) {
 	}
 	if _, ok := m.getClient("peer1"); ok {
 		t.Error("client should be removed after markDead")
+	}
+	if _, ok := m.getReplicator("peer1"); ok {
+		t.Error("replicator should be removed after markDead")
 	}
 }
 
