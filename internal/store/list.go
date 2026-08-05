@@ -12,7 +12,7 @@ import (
 // The shard lock in DataStore protects all field access.
 type ListStructure struct {
 	sizeBase
-	writeAtBase
+	mtimeBase
 	items     [][]byte
 	expiresAt int64 // unix seconds, 0 = no expiry
 }
@@ -30,7 +30,7 @@ func (l *ListStructure) ByteSize() int64 {
 	for _, item := range l.items {
 		n += int64(len(item)) + sliceItemOverhead
 	}
-	return n + writeAtSize + keyExpirySize
+	return n + mtimeSize + keyExpirySize
 }
 
 // LPush prepends data to the head of the list.
@@ -137,11 +137,11 @@ func normalizeListBound(b, length int) int {
 type wireList struct {
 	Items     [][]byte `msgpack:"i"`
 	ExpiresAt int64    `msgpack:"e"`
-	WriteAt   int64    `msgpack:"wa"`
+	MTime     uint32   `msgpack:"mt"`
 }
 
 func (l *ListStructure) Encode() ([]byte, error) {
-	return msgpack.Marshal(wireList{Items: l.items, ExpiresAt: l.expiresAt, WriteAt: l.writeAt})
+	return msgpack.Marshal(wireList{Items: l.items, ExpiresAt: l.expiresAt, MTime: l.mtime})
 }
 
 func DecodeListStructure(data []byte) (*ListStructure, error) {
@@ -150,7 +150,7 @@ func DecodeListStructure(data []byte) (*ListStructure, error) {
 		return nil, err
 	}
 	ls := &ListStructure{items: w.Items, expiresAt: w.ExpiresAt}
-	ls.writeAt = w.WriteAt
+	ls.mtime = w.MTime
 	if ls.items == nil {
 		ls.items = [][]byte{}
 	}

@@ -45,13 +45,13 @@ type DataStructure interface {
 	// ByteSize returns the estimated in-memory byte cost of this value (excluding
 	// the key and per-entry overhead, which are added by the DataStore).
 	ByteSize() int64
-	// WriteAt returns the Unix nanosecond timestamp of the last write.
+	// MTime returns the Unix second timestamp of the last write.
 	// Used by ApplyIfNewer to resolve rebalance conflicts (LWW).
-	WriteAt() int64
-	// cachedSize / setCachedSize / setWriteAt are package-internal bookkeeping.
+	MTime() uint32
+	// cachedSize / setCachedSize / setMTime are package-internal bookkeeping.
 	cachedSize() int64
 	setCachedSize(int64)
-	setWriteAt(int64)
+	setMTime(uint32)
 }
 
 // sizeBase holds the cached byte cost for a stored entry. Embed it in each
@@ -63,23 +63,23 @@ type sizeBase struct {
 func (b *sizeBase) cachedSize() int64     { return b.size }
 func (b *sizeBase) setCachedSize(n int64) { b.size = n }
 
-// writeAtBase holds the last-write timestamp for LWW conflict resolution.
+// mtimeBase holds the last-write timestamp for LWW conflict resolution.
 // Embed it in each concrete DataStructure type alongside sizeBase.
-type writeAtBase struct {
-	writeAt int64
+type mtimeBase struct {
+	mtime uint32
 }
 
-func (b *writeAtBase) WriteAt() int64     { return b.writeAt }
-func (b *writeAtBase) setWriteAt(t int64) { b.writeAt = t }
+func (b *mtimeBase) MTime() uint32     { return b.mtime }
+func (b *mtimeBase) setMTime(t uint32) { b.mtime = t }
 
 // -- DataStore --
 
 // Byte-size constants for struct fields shared across all DataStructure types.
 const (
-	entryOverhead    = 64 // per-entry cost added to ByteSize() to account for the map bucket allocation
-	writeAtSize      = 8  // writeAtBase.writeAt int64
-	keyExpirySize    = 8  // key-level expiresAt int64
-	mapEntryOverhead = 16 // per-item cost in member/field maps: int64 expiry (8) + map bucket (8)
+	entryOverhead     = 64 // per-entry cost added to ByteSize() to account for the map bucket allocation
+	mtimeSize         = 4  // mtimeBase.mtime uint32
+	keyExpirySize     = 8  // key-level expiresAt int64
+	mapEntryOverhead  = 16 // per-item cost in member/field maps: int64 expiry (8) + map bucket (8)
 	sliceItemOverhead = 24 // per-element cost in [][]byte slices: slice header (pointer+len+cap = 24)
 	zsetEntryOverhead = 32 // per-member cost in sorted []zsetEntry: string header (16) + float64 (8) + padding (8)
 )
@@ -173,7 +173,7 @@ func (ds *DataStore) upsertEntry(s *shard, key string, e DataStructure) error {
 		ds.used.Add(size)
 	}
 
-	e.setWriteAt(time.Now().UnixNano())
+	e.setMTime(uint32(time.Now().Unix()))
 	e.setCachedSize(size)
 	s.data[key] = e
 	return nil
@@ -261,8 +261,8 @@ func (ds *DataStore) Apply(key string, fn func(DataStructure) (DataStructure, er
 	return ds.upsertEntry(s, key, next)
 }
 
-// ApplyIfNewer stores incoming only when its WriteAt exceeds the currently
-// stored entry's WriteAt (or no entry exists). Last-Write-Wins conflict
+// ApplyIfNewer stores incoming only when its MTime exceeds the currently
+// stored entry's MTime (or no entry exists). Last-Write-Wins conflict
 // resolution for rebalancing keys written on both sides of a network partition.
 func (ds *DataStore) ApplyIfNewer(key string, incoming DataStructure) error {
 	s := ds.getShard(key)
@@ -270,7 +270,7 @@ func (ds *DataStore) ApplyIfNewer(key string, incoming DataStructure) error {
 	defer s.mu.Unlock()
 
 	existing, exists := s.data[key]
-	if exists && existing.WriteAt() >= incoming.WriteAt() {
+	if exists && existing.MTime() >= incoming.MTime() {
 		return nil
 	}
 

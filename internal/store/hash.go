@@ -20,7 +20,7 @@ func (f hashField) alive(nowNs int64) bool {
 // The shard lock in DataStore protects all field access — no internal lock needed.
 type HashStructure struct {
 	sizeBase
-	writeAtBase
+	mtimeBase
 	fields    map[string]hashField
 	expiresAt int64 // key-level expiry, unix seconds, 0 = no expiry
 }
@@ -38,7 +38,7 @@ func (h *HashStructure) ByteSize() int64 {
 	for name, f := range h.fields {
 		n += int64(len(name)+len(f.Data)) + mapEntryOverhead
 	}
-	return n + writeAtSize + keyExpirySize
+	return n + mtimeSize + keyExpirySize
 }
 
 // HSet sets field to data with no expiry. An existing TTL is cleared.
@@ -124,14 +124,14 @@ type wireHashField struct {
 type wireHash struct {
 	Fields    map[string]wireHashField `msgpack:"f"`
 	ExpiresAt int64                    `msgpack:"e"`
-	WriteAt   int64                    `msgpack:"wa"`
+	MTime     uint32                   `msgpack:"mt"`
 }
 
 func (h *HashStructure) Encode() ([]byte, error) {
 	w := wireHash{
 		Fields:    make(map[string]wireHashField, len(h.fields)),
 		ExpiresAt: h.expiresAt,
-		WriteAt:   h.writeAt,
+		MTime:     h.mtime,
 	}
 	for name, f := range h.fields {
 		w.Fields[name] = wireHashField{Data: f.Data, ExpiresAt: f.expiresAt}
@@ -149,6 +149,6 @@ func DecodeHashStructure(data []byte) (*HashStructure, error) {
 		fields[name] = hashField{Data: wf.Data, expiresAt: wf.ExpiresAt}
 	}
 	hs := &HashStructure{fields: fields, expiresAt: w.ExpiresAt}
-	hs.writeAt = w.WriteAt
+	hs.mtime = w.MTime
 	return hs, nil
 }

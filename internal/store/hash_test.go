@@ -145,12 +145,12 @@ func TestHashCleanupReportsEmptyWhenAllExpired(t *testing.T) {
 
 func TestHashByteSize(t *testing.T) {
 	h := NewHashStructure()
-	emptyWant := int64(writeAtSize + keyExpirySize)
+	emptyWant := int64(mtimeSize + keyExpirySize)
 	if got := h.ByteSize(); got != emptyWant {
 		t.Errorf("ByteSize: empty hash should be %d, got %d", emptyWant, got)
 	}
 	h.HSet("field", []byte("data"))
-	want := int64(len("field")+len("data")) + mapEntryOverhead + writeAtSize + keyExpirySize
+	want := int64(len("field")+len("data")) + mapEntryOverhead + mtimeSize + keyExpirySize
 	if got := h.ByteSize(); got != want {
 		t.Errorf("ByteSize: got %d, want %d", got, want)
 	}

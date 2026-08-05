@@ -229,14 +229,14 @@ func TestZSetZRangeByScoreInvertedRange(t *testing.T) {
 
 func TestZSetByteSize(t *testing.T) {
 	z := NewZSetStructure()
-	emptyWant := int64(writeAtSize + keyExpirySize)
+	emptyWant := int64(mtimeSize + keyExpirySize)
 	if got := z.ByteSize(); got != emptyWant {
 		t.Errorf("ByteSize empty: got %d, want %d", got, emptyWant)
 	}
 
 	member := "alice"
 	z.ZAdd(member, 1.0)
-	want := int64(len(member))+mapEntryOverhead + zsetEntryOverhead + writeAtSize + keyExpirySize
+	want := int64(len(member)) + mapEntryOverhead + zsetEntryOverhead + mtimeSize + keyExpirySize
 	if got := z.ByteSize(); got != want {
 		t.Errorf("ByteSize with one member: got %d, want %d", got, want)
 	}
@@ -248,7 +248,7 @@ func TestZSetEncodeDecodeRoundTrip(t *testing.T) {
 	z.ZAdd("bob", 3.0)
 	z.ZAdd("carol", 7.25)
 	z.SetKeyExpiry(8888)
-	z.writeAt = 99
+	z.mtime = 99
 
 	data, err := z.Encode()
 	if err != nil {
@@ -261,8 +261,8 @@ func TestZSetEncodeDecodeRoundTrip(t *testing.T) {
 	if decoded.KeyExpiry() != 8888 {
 		t.Errorf("round-trip: KeyExpiry got %d, want 8888", decoded.KeyExpiry())
 	}
-	if decoded.WriteAt() != 99 {
-		t.Errorf("round-trip: WriteAt got %d, want 99", decoded.WriteAt())
+	if decoded.MTime() != 99 {
+		t.Errorf("round-trip: MTime got %d, want 99", decoded.MTime())
 	}
 	if decoded.ZCard() != 3 {
 		t.Fatalf("round-trip: ZCard got %d, want 3", decoded.ZCard())

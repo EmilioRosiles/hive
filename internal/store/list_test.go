@@ -181,14 +181,14 @@ func TestListRangeInverted(t *testing.T) {
 
 func TestListByteSize(t *testing.T) {
 	l := NewListStructure()
-	emptyWant := int64(writeAtSize + keyExpirySize)
+	emptyWant := int64(mtimeSize + keyExpirySize)
 	if got := l.ByteSize(); got != emptyWant {
 		t.Errorf("ByteSize: empty list should be %d, got %d", emptyWant, got)
 	}
 
 	data := []byte("hello")
 	l.RPush(data)
-	want := int64(len(data))+sliceItemOverhead + writeAtSize + keyExpirySize
+	want := int64(len(data)) + sliceItemOverhead + mtimeSize + keyExpirySize
 	if got := l.ByteSize(); got != want {
 		t.Errorf("ByteSize: got %d, want %d", got, want)
 	}
@@ -199,7 +199,7 @@ func TestListEncodeDecodeRoundTrip(t *testing.T) {
 	l.RPush([]byte("alpha"))
 	l.RPush([]byte("beta"))
 	l.SetKeyExpiry(1234)
-	l.writeAt = 42
+	l.mtime = 42
 
 	data, err := l.Encode()
 	if err != nil {
@@ -212,8 +212,8 @@ func TestListEncodeDecodeRoundTrip(t *testing.T) {
 	if decoded.KeyExpiry() != 1234 {
 		t.Errorf("round-trip: KeyExpiry got %d, want 1234", decoded.KeyExpiry())
 	}
-	if decoded.WriteAt() != 42 {
-		t.Errorf("round-trip: WriteAt got %d, want 42", decoded.WriteAt())
+	if decoded.MTime() != 42 {
+		t.Errorf("round-trip: MTime got %d, want 42", decoded.MTime())
 	}
 	if decoded.Len() != 2 {
 		t.Fatalf("round-trip: Len got %d, want 2", decoded.Len())

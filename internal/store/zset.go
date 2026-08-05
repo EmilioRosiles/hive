@@ -19,7 +19,7 @@ type zsetEntry struct {
 // field access.
 type ZSetStructure struct {
 	sizeBase
-	writeAtBase
+	mtimeBase
 	scores    map[string]float64 // O(1) lookup by member
 	sorted    []zsetEntry        // score-ordered slice for rank / range ops
 	expiresAt int64              // unix seconds, 0 = no expiry
@@ -41,7 +41,7 @@ func (z *ZSetStructure) ByteSize() int64 {
 		// sorted slice: zsetEntry struct (string header + float64) per element
 		n += zsetEntryOverhead
 	}
-	return n + writeAtSize + keyExpirySize
+	return n + mtimeSize + keyExpirySize
 }
 
 // ZAdd inserts or updates member with score. The sorted slice is kept in order.
@@ -185,7 +185,7 @@ type wireZSetEntry struct {
 type wireZSet struct {
 	Entries   []wireZSetEntry `msgpack:"e"`
 	ExpiresAt int64           `msgpack:"ea"`
-	WriteAt   int64           `msgpack:"wa"`
+	MTime     uint32          `msgpack:"mt"`
 }
 
 func (z *ZSetStructure) Encode() ([]byte, error) {
@@ -193,7 +193,7 @@ func (z *ZSetStructure) Encode() ([]byte, error) {
 	for i, e := range z.sorted {
 		entries[i] = wireZSetEntry{Member: e.Member, Score: e.Score}
 	}
-	return msgpack.Marshal(wireZSet{Entries: entries, ExpiresAt: z.expiresAt, WriteAt: z.writeAt})
+	return msgpack.Marshal(wireZSet{Entries: entries, ExpiresAt: z.expiresAt, MTime: z.mtime})
 }
 
 func DecodeZSetStructure(data []byte) (*ZSetStructure, error) {
@@ -203,7 +203,7 @@ func DecodeZSetStructure(data []byte) (*ZSetStructure, error) {
 	}
 	zs := NewZSetStructure()
 	zs.expiresAt = w.ExpiresAt
-	zs.writeAt = w.WriteAt
+	zs.mtime = w.MTime
 	// Rebuild from the already-ordered entries list; skip insert's binary search.
 	zs.sorted = make([]zsetEntry, len(w.Entries))
 	for i, we := range w.Entries {
