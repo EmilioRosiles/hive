@@ -26,7 +26,6 @@ func newTestCluster(nodeID string) *Cluster {
 	}
 	m.incarnation.Store(uint64(time.Now().UnixNano()))
 	m.rebalancer = newRebalancer(0, m)
-	m.rebalancer.lastRing = r.Copy()
 	return m
 }
 

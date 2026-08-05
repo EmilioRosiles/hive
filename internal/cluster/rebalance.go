@@ -50,7 +50,7 @@ type rebalancer struct {
 }
 
 func newRebalancer(debounce time.Duration, mgr *Cluster) *rebalancer {
-	return &rebalancer{debounce: debounce, mgr: mgr}
+	return &rebalancer{debounce: debounce, mgr: mgr, lastRing: mgr.ring.Copy()}
 }
 
 // schedule debounces rebalance runs so rapid membership changes don't cause cascading migrations.
@@ -178,7 +178,7 @@ func migrationLeader(oldOwners, newOwners []string, m *Cluster) string {
 		if id == m.cfg.NodeID {
 			return id
 		}
-		if p, ok := m.getPeer(id); ok && p.Status == NodeAlive {
+		if status, ok := m.peerStatus(id); ok && status == NodeAlive {
 			return id
 		}
 	}

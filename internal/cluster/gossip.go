@@ -152,12 +152,7 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 			continue
 		}
 
-		if rs.Incarnation > local.Incarnation {
-			m.mu.Lock()
-			local.Incarnation = rs.Incarnation
-			localStatus := NodeStatus(local.Status)
-			m.mu.Unlock()
-
+		if localStatus, ok := m.applyIncarnation(local, rs.Incarnation); ok {
 			switch NodeStatus(rs.Status) {
 			case NodeDead:
 				if localStatus == NodeAlive {
@@ -171,6 +166,22 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 		}
 	}
 	return nil
+}
+
+// applyIncarnation atomically checks whether incarnation is newer than
+// local's current value and, if so, updates it. Reading local.Incarnation and
+// writing it must happen under the same lock — local is a live pointer into
+// m.peers shared with concurrent heartbeat handlers/senders, so checking the
+// value first and locking only for the write (the previous approach) leaves
+// a window where two goroutines can race on the same field.
+func (m *Cluster) applyIncarnation(local *PeerInfo, incarnation uint64) (status NodeStatus, applied bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if incarnation <= local.Incarnation {
+		return 0, false
+	}
+	local.Incarnation = incarnation
+	return NodeStatus(local.Status), true
 }
 
 // buildHeartbeatRequest assembles the current node's peer list for gossip.
