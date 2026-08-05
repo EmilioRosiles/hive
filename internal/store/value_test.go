@@ -8,7 +8,7 @@ import (
 func TestValueByteSize(t *testing.T) {
 	data := []byte("hello world")
 	v := NewValueStructure(data)
-	want := int64(len(data)) + writeAtSize + keyExpirySize
+	want := int64(len(data)) + mtimeSize + keyExpirySize
 	if got := v.ByteSize(); got != want {
 		t.Errorf("ByteSize: got %d, want %d", got, want)
 	}
@@ -16,7 +16,7 @@ func TestValueByteSize(t *testing.T) {
 
 func TestValueByteSizeEmpty(t *testing.T) {
 	v := NewValueStructure(nil)
-	want := int64(writeAtSize + keyExpirySize)
+	want := int64(mtimeSize + keyExpirySize)
 	if got := v.ByteSize(); got != want {
 		t.Errorf("ByteSize(nil): got %d, want %d", got, want)
 	}
@@ -25,7 +25,7 @@ func TestValueByteSizeEmpty(t *testing.T) {
 func TestValueEncode(t *testing.T) {
 	data := []byte("payload")
 	v := NewValueStructure(data)
-	v.setWriteAt(42)
+	v.setMTime(42)
 	enc, err := v.Encode()
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
@@ -38,8 +38,8 @@ func TestValueEncode(t *testing.T) {
 	if string(got.Data) != string(data) {
 		t.Errorf("Data: got %q, want %q", got.Data, data)
 	}
-	if got.WriteAt() != 42 {
-		t.Errorf("WriteAt: got %d, want 42", got.WriteAt())
+	if got.MTime() != 42 {
+		t.Errorf("MTime: got %d, want 42", got.MTime())
 	}
 }
 

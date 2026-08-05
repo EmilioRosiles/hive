@@ -1,6 +1,9 @@
 package store
 
 import (
+	"fmt"
+	"math/rand/v2"
+	"sort"
 	"testing"
 	"time"
 )
@@ -228,17 +231,127 @@ func TestZSetZRangeByScoreInvertedRange(t *testing.T) {
 }
 
 func TestZSetByteSize(t *testing.T) {
+	// Force a deterministic tower height so the expected byte count is a
+	// fixed number instead of a random draw.
+	old := randomLevel
+	randomLevel = func() int { return 1 }
+	defer func() { randomLevel = old }()
+
 	z := NewZSetStructure()
-	emptyWant := int64(writeAtSize + keyExpirySize)
+	emptyWant := int64(zsetNodeOverhead+zsetLevelSize) + mtimeSize + keyExpirySize
 	if got := z.ByteSize(); got != emptyWant {
 		t.Errorf("ByteSize empty: got %d, want %d", got, emptyWant)
 	}
 
 	member := "alice"
 	z.ZAdd(member, 1.0)
-	want := int64(len(member))+mapEntryOverhead + zsetEntryOverhead + writeAtSize + keyExpirySize
+	want := emptyWant + int64(len(member)) + mapEntryOverhead + zsetNodeOverhead + zsetLevelSize
 	if got := z.ByteSize(); got != want {
 		t.Errorf("ByteSize with one member: got %d, want %d", got, want)
+	}
+}
+
+// zsetWalkBytes independently recomputes the byte formula ByteSize uses by
+// walking every node, as a cross-check for the incrementally maintained
+// nodeBytes counter.
+func zsetWalkBytes(z *ZSetStructure) int64 {
+	n := int64(zsetNodeOverhead) + int64(len(z.head.level))*zsetLevelSize
+	for x := z.head.level[0].forward; x != nil; x = x.level[0].forward {
+		n += int64(len(x.member)) + zsetNodeOverhead + int64(len(x.level))*zsetLevelSize
+	}
+	return n
+}
+
+func TestZSetNodeBytesMatchesWalk(t *testing.T) {
+	z := NewZSetStructure()
+	members := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	for round := 0; round < 3; round++ {
+		for i, m := range members {
+			z.ZAdd(m, float64(i)+float64(round))
+		}
+		if got, want := z.nodeBytes, zsetWalkBytes(z); got != want {
+			t.Fatalf("round %d after ZAdds: nodeBytes=%d, want %d (walked)", round, got, want)
+		}
+		for _, m := range members[:5] {
+			z.ZRem(m)
+		}
+		if got, want := z.nodeBytes, zsetWalkBytes(z); got != want {
+			t.Fatalf("round %d after ZRems: nodeBytes=%d, want %d (walked)", round, got, want)
+		}
+	}
+}
+
+func TestZSetBulkLoadMatchesSequentialZAdd(t *testing.T) {
+	entries := []wireZSetEntry{
+		{Member: "a", Score: 1.0},
+		{Member: "b", Score: 2.0},
+		{Member: "c", Score: 2.0}, // tie with b, lexicographically after
+		{Member: "d", Score: 5.0},
+		{Member: "e", Score: 5.0},
+	}
+
+	viaBulk := NewZSetStructure()
+	viaBulk.bulkLoad(entries)
+
+	viaAdd := NewZSetStructure()
+	for _, e := range entries {
+		viaAdd.ZAdd(e.Member, e.Score)
+	}
+
+	if viaBulk.ZCard() != viaAdd.ZCard() {
+		t.Fatalf("ZCard: bulk=%d add=%d", viaBulk.ZCard(), viaAdd.ZCard())
+	}
+	for _, e := range entries {
+		gotRank, ok := viaBulk.ZRank(e.Member)
+		if !ok {
+			t.Fatalf("bulk ZRank(%s): not found", e.Member)
+		}
+		wantRank, _ := viaAdd.ZRank(e.Member)
+		if gotRank != wantRank {
+			t.Errorf("ZRank(%s): bulk=%d want=%d", e.Member, gotRank, wantRank)
+		}
+	}
+
+	// Insert one more member after bulk-loading to exercise span termination
+	// at the tail — this is exactly where a bad bulkLoad leaves stale spans
+	// that only surface on the *next* insert.
+	viaBulk.ZAdd("z", 100.0)
+	viaAdd.ZAdd("z", 100.0)
+	gotRange := viaBulk.ZRange(0, -1)
+	wantRange := viaAdd.ZRange(0, -1)
+	if len(gotRange) != len(wantRange) {
+		t.Fatalf("ZRange after post-bulk insert: got %d entries, want %d", len(gotRange), len(wantRange))
+	}
+	for i := range wantRange {
+		if gotRange[i].Member != wantRange[i].Member || gotRange[i].Score != wantRange[i].Score {
+			t.Errorf("ZRange[%d]: got %+v, want %+v", i, gotRange[i], wantRange[i])
+		}
+	}
+}
+
+func TestZSetZRankLargeEqualScoreRun(t *testing.T) {
+	z := NewZSetStructure()
+	const n = 1000
+	members := make([]string, n)
+	for i := range n {
+		members[i] = fmt.Sprintf("m%04d", i)
+	}
+	// Insert in shuffled order so the skip list isn't built purely append-only.
+	shuffled := append([]string(nil), members...)
+	rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+	for _, m := range shuffled {
+		z.ZAdd(m, 5.0) // identical score for all
+	}
+
+	sort.Strings(members) // expected lexicographic order at the tied score
+	for wantRank, m := range members {
+		gotRank, ok := z.ZRank(m)
+		if !ok {
+			t.Fatalf("ZRank(%s): not found", m)
+		}
+		if gotRank != wantRank {
+			t.Fatalf("ZRank(%s): got %d, want %d", m, gotRank, wantRank)
+		}
 	}
 }
 
@@ -248,7 +361,7 @@ func TestZSetEncodeDecodeRoundTrip(t *testing.T) {
 	z.ZAdd("bob", 3.0)
 	z.ZAdd("carol", 7.25)
 	z.SetKeyExpiry(8888)
-	z.writeAt = 99
+	z.mtime = 99
 
 	data, err := z.Encode()
 	if err != nil {
@@ -261,8 +374,8 @@ func TestZSetEncodeDecodeRoundTrip(t *testing.T) {
 	if decoded.KeyExpiry() != 8888 {
 		t.Errorf("round-trip: KeyExpiry got %d, want 8888", decoded.KeyExpiry())
 	}
-	if decoded.WriteAt() != 99 {
-		t.Errorf("round-trip: WriteAt got %d, want 99", decoded.WriteAt())
+	if decoded.MTime() != 99 {
+		t.Errorf("round-trip: MTime got %d, want 99", decoded.MTime())
 	}
 	if decoded.ZCard() != 3 {
 		t.Fatalf("round-trip: ZCard got %d, want 3", decoded.ZCard())
@@ -316,6 +429,76 @@ func TestZSetSortedOrderAfterUpdates(t *testing.T) {
 	for i, w := range want {
 		if entries[i].Member != w {
 			t.Errorf("ZRange after update[%d]: got %s, want %s", i, entries[i].Member, w)
+		}
+	}
+}
+
+// TestZSetStressAgainstReferenceModel runs a long randomized ZAdd/ZRem
+// sequence against a plain map-based reference model, cross-checking
+// ZCard/ZRank/ZRange periodically. Skip-list span bookkeeping is the part of
+// this structure most prone to subtle bugs that only surface after many
+// mutations, so this is a stronger regression guard than the smaller
+// hand-written cases above.
+func TestZSetStressAgainstReferenceModel(t *testing.T) {
+	z := NewZSetStructure()
+	ref := map[string]float64{}
+
+	refRanked := func() []string {
+		members := make([]string, 0, len(ref))
+		for m := range ref {
+			members = append(members, m)
+		}
+		sort.Slice(members, func(i, j int) bool {
+			if ref[members[i]] != ref[members[j]] {
+				return ref[members[i]] < ref[members[j]]
+			}
+			return members[i] < members[j]
+		})
+		return members
+	}
+
+	const ops = 20000
+	memberPool := make([]string, 200)
+	for i := range memberPool {
+		memberPool[i] = string(rune('a'+i%26)) + string(rune('A'+(i/26)%26)) + string(rune('0'+i%10))
+	}
+
+	for op := range ops {
+		m := memberPool[rand.IntN(len(memberPool))]
+		switch rand.IntN(3) {
+		case 0, 1: // ZAdd, weighted higher than ZRem to keep the set populated
+			score := float64(rand.IntN(50))
+			z.ZAdd(m, score)
+			ref[m] = score
+		case 2:
+			z.ZRem(m)
+			delete(ref, m)
+		}
+
+		if op%500 != 0 {
+			continue
+		}
+		if gotCard := z.ZCard(); gotCard != len(ref) {
+			t.Fatalf("op %d: ZCard=%d, want %d", op, gotCard, len(ref))
+		}
+		ranked := refRanked()
+		for wantRank, mem := range ranked {
+			gotRank, ok := z.ZRank(mem)
+			if !ok {
+				t.Fatalf("op %d: ZRank(%s) not found, want %d", op, mem, wantRank)
+			}
+			if gotRank != wantRank {
+				t.Fatalf("op %d: ZRank(%s)=%d, want %d", op, mem, gotRank, wantRank)
+			}
+		}
+		gotRange := z.ZRange(0, -1)
+		if len(gotRange) != len(ranked) {
+			t.Fatalf("op %d: ZRange len=%d, want %d", op, len(gotRange), len(ranked))
+		}
+		for i, mem := range ranked {
+			if gotRange[i].Member != mem || gotRange[i].Score != ref[mem] {
+				t.Fatalf("op %d: ZRange[%d]=%+v, want {%s %v}", op, i, gotRange[i], mem, ref[mem])
+			}
 		}
 	}
 }

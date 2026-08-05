@@ -32,7 +32,7 @@ func totalEntries(ds *DataStore) int {
 
 // entrySize returns the accounting cost for key + value string v.
 func entrySize(key, v string) int64 {
-	return int64(len(key)) + int64(len(v)) + writeAtSize + keyExpirySize + entryOverhead
+	return int64(len(key)) + int64(len(v)) + mtimeSize + keyExpirySize + entryOverhead
 }
 
 // -- Set / Get --
@@ -393,7 +393,7 @@ func TestDeleteExpiredRemovesEmptySet(t *testing.T) {
 func TestApplyIfNewer_NoExisting_Stores(t *testing.T) {
 	ds := NewDataStore(0)
 	v := val("hello")
-	v.setWriteAt(time.Now().UnixNano())
+	v.setMTime(uint32(time.Now().Unix()))
 
 	if err := ds.ApplyIfNewer("k", v); err != nil {
 		t.Fatalf("ApplyIfNewer: %v", err)
@@ -408,7 +408,7 @@ func TestApplyIfNewer_NewerWins(t *testing.T) {
 	mustSet(t, ds, "k", val("old"))
 
 	newer := val("new")
-	newer.setWriteAt(time.Now().UnixNano() + int64(time.Hour))
+	newer.setMTime(uint32(time.Now().Add(time.Hour).Unix()))
 
 	if err := ds.ApplyIfNewer("k", newer); err != nil {
 		t.Fatalf("ApplyIfNewer: %v", err)
@@ -424,7 +424,7 @@ func TestApplyIfNewer_OlderLoses(t *testing.T) {
 	mustSet(t, ds, "k", val("current"))
 
 	stale := val("stale")
-	stale.setWriteAt(1) // nanosecond 1 — older than any real write
+	stale.setMTime(1) // second 1 — older than any real write
 
 	if err := ds.ApplyIfNewer("k", stale); err != nil {
 		t.Fatalf("ApplyIfNewer: %v", err)
@@ -440,10 +440,10 @@ func TestApplyIfNewer_SameTimestamp_KeepsExisting(t *testing.T) {
 	mustSet(t, ds, "k", val("first"))
 
 	existing, _ := ds.Get("k")
-	ts := existing.WriteAt()
+	ts := existing.MTime()
 
 	second := val("second")
-	second.setWriteAt(ts) // identical timestamp
+	second.setMTime(ts) // identical timestamp
 
 	ds.ApplyIfNewer("k", second) //nolint
 	e, _ := ds.Get("k")
@@ -455,7 +455,7 @@ func TestApplyIfNewer_SameTimestamp_KeepsExisting(t *testing.T) {
 func TestApplyIfNewer_UsedAccountingNewKey(t *testing.T) {
 	ds := NewDataStore(0)
 	v := val("hello")
-	v.setWriteAt(time.Now().UnixNano())
+	v.setMTime(uint32(time.Now().Unix()))
 
 	ds.ApplyIfNewer("k", v) //nolint
 	want := entrySize("k", "hello")
@@ -469,7 +469,7 @@ func TestApplyIfNewer_UsedAccountingReplace(t *testing.T) {
 	mustSet(t, ds, "k", val("short"))
 
 	longer := val("much-longer")
-	longer.setWriteAt(time.Now().UnixNano() + int64(time.Hour))
+	longer.setMTime(uint32(time.Now().Add(time.Hour).Unix()))
 
 	ds.ApplyIfNewer("k", longer) //nolint
 	want := entrySize("k", "much-longer")
@@ -485,7 +485,7 @@ func TestApplyIfNewer_CapacityEnforced(t *testing.T) {
 
 	// A newer but larger value must be rejected when over capacity.
 	big := val("this-value-is-too-large")
-	big.setWriteAt(time.Now().UnixNano() + int64(time.Hour))
+	big.setMTime(uint32(time.Now().Add(time.Hour).Unix()))
 
 	if err := ds.ApplyIfNewer(key, big); !errors.Is(err, ErrCapacityExceeded) {
 		t.Errorf("expected ErrCapacityExceeded, got %v", err)

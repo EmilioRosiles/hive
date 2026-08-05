@@ -9,14 +9,14 @@ import (
 // wireValue is the msgpack-serializable form of ValueStructure.
 type wireValue struct {
 	Data      []byte `msgpack:"d"`
-	WriteAt   int64  `msgpack:"wa"`
+	MTime     uint32 `msgpack:"mt"`
 	ExpiresAt int64  `msgpack:"e"`
 }
 
 // ValueStructure holds a raw byte payload with an optional key-level expiry.
 type ValueStructure struct {
 	sizeBase
-	writeAtBase
+	mtimeBase
 	Data      []byte
 	expiresAt int64 // unix seconds, 0 = no expiry
 }
@@ -32,10 +32,10 @@ func NewValueStructureWithTTL(data []byte, ttl time.Duration) *ValueStructure {
 func (v *ValueStructure) Kind() Kind           { return KindValue }
 func (v *ValueStructure) KeyExpiry() int64     { return v.expiresAt }
 func (v *ValueStructure) SetKeyExpiry(s int64) { v.expiresAt = s }
-func (v *ValueStructure) ByteSize() int64      { return int64(len(v.Data)) + writeAtSize + keyExpirySize }
+func (v *ValueStructure) ByteSize() int64      { return int64(len(v.Data)) + mtimeSize + keyExpirySize }
 
 func (v *ValueStructure) Encode() ([]byte, error) {
-	return msgpack.Marshal(wireValue{Data: v.Data, WriteAt: v.writeAt, ExpiresAt: v.expiresAt})
+	return msgpack.Marshal(wireValue{Data: v.Data, MTime: v.mtime, ExpiresAt: v.expiresAt})
 }
 
 func DecodeValueStructure(data []byte) (*ValueStructure, error) {
@@ -44,7 +44,7 @@ func DecodeValueStructure(data []byte) (*ValueStructure, error) {
 		return nil, err
 	}
 	vs := &ValueStructure{Data: w.Data, expiresAt: w.ExpiresAt}
-	vs.writeAt = w.WriteAt
+	vs.mtime = w.MTime
 	return vs, nil
 }
 

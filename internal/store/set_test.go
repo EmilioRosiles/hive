@@ -120,13 +120,13 @@ func TestSetCleanupReportsEmptyWhenAllExpired(t *testing.T) {
 
 func TestSetByteSize(t *testing.T) {
 	ss := NewSetStructure()
-	emptyWant := int64(writeAtSize + keyExpirySize)
+	emptyWant := int64(mtimeSize + keyExpirySize)
 	if got := ss.ByteSize(); got != emptyWant {
 		t.Errorf("ByteSize: empty set should be %d, got %d", emptyWant, got)
 	}
 	ss.Add("alice")
 	ss.Add("bob")
-	want := int64(len("alice")+mapEntryOverhead) + int64(len("bob")+mapEntryOverhead) + writeAtSize + keyExpirySize
+	want := int64(len("alice")+mapEntryOverhead) + int64(len("bob")+mapEntryOverhead) + mtimeSize + keyExpirySize
 	if got := ss.ByteSize(); got != want {
 		t.Errorf("ByteSize: got %d, want %d", got, want)
 	}
