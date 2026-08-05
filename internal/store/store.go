@@ -81,7 +81,8 @@ const (
 	keyExpirySize     = 8  // key-level expiresAt int64
 	mapEntryOverhead  = 16 // per-item cost in member/field maps: int64 expiry (8) + map bucket (8)
 	sliceItemOverhead = 24 // per-element cost in [][]byte slices: slice header (pointer+len+cap = 24)
-	zsetEntryOverhead = 32 // per-member cost in sorted []zsetEntry: string header (16) + float64 (8) + padding (8)
+	zsetNodeOverhead  = 56 // zsetNode struct: member string header(16) + score(8) + backward ptr(8) + level slice header(24)
+	zsetLevelSize     = 16 // one zsetLevel: forward pointer (8) + span int (8)
 )
 
 type shard struct {
