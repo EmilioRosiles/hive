@@ -1,6 +1,7 @@
 package hive
 
 import (
+	"crypto/tls"
 	"log/slog"
 	"time"
 
@@ -95,6 +96,12 @@ type Config struct {
 	// nil defaults to slog.LevelError (quiet). Set explicitly to enable
 	// more verbose output, e.g. &slog.LevelInfo or &slog.LevelDebug.
 	LogLevel *slog.Level
+
+	// TLSConfig enables TLS for cluster-mode peer connections when non-nil.
+	// nil disables TLS (default, plaintext). Build one with
+	// NewClusterTLSConfig for mutual TLS with chain-only peer verification,
+	// or construct your own *tls.Config for full control.
+	TLSConfig *tls.Config
 }
 
 func defaultConfig() Config {

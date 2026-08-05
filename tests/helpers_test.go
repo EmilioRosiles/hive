@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"testing"
@@ -50,6 +51,28 @@ func clusterNode(t testing.TB, seeds []string, rf int) (*hive.Node, *hive.Cache)
 	})
 	if err != nil {
 		t.Fatalf("clusterNode: %v", err)
+	}
+	t.Cleanup(func() { node.Shutdown() })
+	return node, node.Cache()
+}
+
+// clusterNodeTLS mirrors clusterNode but binds cluster-mode peer connections
+// over TLS using tlsConfig.
+func clusterNodeTLS(t testing.TB, seeds []string, rf int, tlsConfig *tls.Config) (*hive.Node, *hive.Cache) {
+	t.Helper()
+	node, err := hive.NewNode(hive.Config{
+		Mode:              hive.ModeCluster,
+		BindAddr:          "127.0.0.1",
+		BindPort:          freePort(t),
+		Seeds:             seeds,
+		ReplicationFactor: rf,
+		GossipInterval:    100 * time.Millisecond,
+		GossipFanout:      3,
+		RebalanceDebounce: 50 * time.Millisecond,
+		TLSConfig:         tlsConfig,
+	})
+	if err != nil {
+		t.Fatalf("clusterNodeTLS: %v", err)
 	}
 	t.Cleanup(func() { node.Shutdown() })
 	return node, node.Cache()

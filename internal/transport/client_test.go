@@ -22,7 +22,7 @@ func TestClient_RoundTrip_MsgForward(t *testing.T) {
 	handler, received := echoHandler(t, map[MsgType][]byte{MsgForward: respPayload})
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String())
+	client := NewClient(s.Addr().String(), nil)
 	defer client.Close()
 
 	frame, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: reqPayload})
@@ -48,7 +48,7 @@ func TestClient_HandlerError_ReturnsErrRejected(t *testing.T) {
 	}
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String())
+	client := NewClient(s.Addr().String(), nil)
 	defer client.Close()
 
 	_, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")})
@@ -70,7 +70,7 @@ func TestClient_ConcurrentSends_MultiplexedOverOneConnection(t *testing.T) {
 	}
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String())
+	client := NewClient(s.Addr().String(), nil)
 	defer client.Close()
 
 	const n = 100
@@ -115,7 +115,7 @@ func TestClient_RoundTrip_MsgRebalance(t *testing.T) {
 	handler, received := echoHandler(t, nil)
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String())
+	client := NewClient(s.Addr().String(), nil)
 	defer client.Close()
 
 	frame, err := client.Send(context.Background(), Frame{Type: MsgRebalance, Payload: payload})

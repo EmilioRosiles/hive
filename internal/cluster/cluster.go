@@ -3,6 +3,7 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -41,6 +42,7 @@ type Config struct {
 	ReplicationBatchSize int
 	CleanupInterval      time.Duration
 	Clustered            bool
+	TLSConfig            *tls.Config
 }
 
 // PeerInfo is the canonical peer representation used both as internal mutable
@@ -93,7 +95,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 
 	if cfg.Clustered {
 		addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.BindPort)
-		srv, err := transport.NewServer(addr, m.handleFrame)
+		srv, err := transport.NewServer(addr, m.handleFrame, cfg.TLSConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -151,7 +153,7 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 			p.Status = NodeAlive
 			p.Incarnation = ps.Incarnation
 			m.ring.Add(ps.NodeID, vNodeCount)
-			m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
+			m.clients[ps.NodeID] = m.newClient(ps.Addr)
 			m.replicators[ps.NodeID] = newReplicator(ps.NodeID, m)
 			go m.rebalancer.schedule()
 		}
@@ -167,7 +169,7 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 		MemLimit:          ps.MemLimit,
 	}
 	m.ring.Add(ps.NodeID, vNodeCount)
-	m.clients[ps.NodeID] = transport.NewClient(ps.Addr)
+	m.clients[ps.NodeID] = m.newClient(ps.Addr)
 	m.replicators[ps.NodeID] = newReplicator(ps.NodeID, m)
 	go m.rebalancer.schedule()
 
@@ -242,6 +244,12 @@ func (m *Cluster) peerStatus(nodeID string) (NodeStatus, bool) {
 		return 0, false
 	}
 	return p.Status, true
+}
+
+// newClient builds a transport client for addr, applying this node's TLS
+// config (nil means plaintext).
+func (m *Cluster) newClient(addr string) *transport.Client {
+	return transport.NewClient(addr, m.cfg.TLSConfig)
 }
 
 // getClient returns the transport client for a peer node ID.

@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -16,14 +17,17 @@ const defaultTimeout = 3 * time.Second
 // The connection is established lazily and re-established automatically
 // after a failure.
 type Client struct {
-	addr    string
-	timeout time.Duration
-	mu      sync.Mutex
-	mux     *mux
+	addr      string
+	timeout   time.Duration
+	tlsConfig *tls.Config
+	mu        sync.Mutex
+	mux       *mux
 }
 
-func NewClient(addr string) *Client {
-	return &Client{addr: addr, timeout: defaultTimeout}
+// NewClient creates a client for addr. If tlsConfig is non-nil, connections
+// are dialed over TLS using it; nil means plaintext.
+func NewClient(addr string, tlsConfig *tls.Config) *Client {
+	return &Client{addr: addr, timeout: defaultTimeout, tlsConfig: tlsConfig}
 }
 
 // Send delivers frame to the peer and returns the response.
@@ -73,7 +77,13 @@ func (c *Client) getMux() (*mux, error) {
 		return c.mux, nil
 	}
 
-	conn, err := net.DialTimeout("tcp", c.addr, c.timeout)
+	var conn net.Conn
+	var err error
+	if c.tlsConfig != nil {
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: c.timeout}, "tcp", c.addr, c.tlsConfig)
+	} else {
+		conn, err = net.DialTimeout("tcp", c.addr, c.timeout)
+	}
 	if err != nil {
 		return nil, err
 	}

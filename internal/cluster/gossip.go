@@ -108,7 +108,7 @@ func (m *Cluster) bootstrap(addr string) {
 	if err != nil {
 		return
 	}
-	client := transport.NewClient(addr)
+	client := m.newClient(addr)
 	resp, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgHeartbeat, Payload: payload})
 	if err != nil {
 		var rejected *transport.ErrRejected
@@ -232,7 +232,7 @@ func (m *Cluster) announceLeave() {
 		wg.Add(1)
 		go func(addr string) {
 			defer wg.Done()
-			c := transport.NewClient(addr)
+			c := m.newClient(addr)
 			c.Send(context.Background(), frame)
 		}(p.Addr)
 	}
