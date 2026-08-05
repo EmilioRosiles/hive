@@ -293,13 +293,18 @@ func (m *Cluster) responsibleNodes(key string) []string {
 
 // vNode count constants for weighted consistent hashing.
 const (
-	vNodesPerUnit = 100       // virtual nodes per unitSize of memory
+	vNodesPerUnit = 32        // virtual nodes per unitSize of memory
 	unitSize      = 256 << 20 // 256 MiB
-	defaultVNodes = 100
 )
 
 // computeVNodes derives the virtual node count from a memory limit in bytes.
-// A node with no MemLimit gets defaultVNodes, preserving previous behaviour.
+// A memLimit of exactly 0 yields 0 vnodes — no keyspace ownership, used for
+// a pure routing/relay node. Any positive memLimit yields at least 1 vnode,
+// even if it's smaller than unitSize, so a small-but-nonzero limit is never
+// silently rounded down to zero ownership by integer truncation.
 func computeVNodes(memLimit uint64) int {
-	return max(defaultVNodes, int(memLimit/unitSize)*vNodesPerUnit)
+	if memLimit == 0 {
+		return 0
+	}
+	return max(1, int(memLimit/unitSize)*vNodesPerUnit)
 }

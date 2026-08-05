@@ -74,6 +74,25 @@ node, err := hive.NewNode(hive.Config{
 })
 ```
 
+### TLS
+
+Cluster-mode peer connections can be secured with mutual TLS — every node authenticates every peer it talks to, not just encrypts the wire. Peer addresses are dynamic (`IP:port`), so verification is chain-based (trust means "signed by our cluster CA") rather than hostname-based — the same pattern used by etcd and Consul.
+
+```go
+tlsConfig, err := hive.NewClusterTLSConfig(certPEM, keyPEM, caPEM)
+if err != nil {
+    log.Fatal(err)
+}
+
+node, err := hive.NewNode(hive.Config{
+    Mode:      hive.ModeCluster,
+    Seeds:     seeds,
+    TLSConfig: tlsConfig,
+})
+```
+
+`NewClusterTLSConfig` builds a ready-to-use `*tls.Config` from PEM-encoded cert/key/CA material; every node needs a certificate signed by the same CA. For full control — custom verification, hot cert rotation via `GetCertificate`/`GetClientCertificate` — set `Config.TLSConfig` to your own `*tls.Config` instead. `nil` disables TLS (default, plaintext).
+
 ### Checking cluster state
 
 ```go
@@ -300,25 +319,50 @@ hive.Config{
     // Must be <= cluster size. Default: 1
     ReplicationFactor int
 
-    // Maximum memory this node intends to use, in bytes.
+    // How long this node waits before cancelling a routed operation
+    // (forward-to-primary or replica fan-out).
+    // Default: 1s
+    RoutingTimeout time.Duration
+
+    // Maximum memory this node intends to use.
     // Controls two things: capacity enforcement (writes are rejected once the
     // limit is reached) and keyspace allocation (nodes with more memory receive
     // proportionally more vnodes on the hash ring, and therefore more keys).
-    // Default: total system memory
-    MemLimit uint64
+    // nil (the zero value, i.e. left unset) means "use total system memory" —
+    // the default. Set with hive.Bytes(n), e.g. hive.Bytes(4 * hive.GB), or
+    // hive.Bytes(0) for a node that owns no keyspace at all — a pure
+    // routing/relay worker that only forwards to the nodes that do.
+    MemLimit MemLimit
 
     // How often this node sends heartbeats to peers.
-    // Default: 3s
+    // Default: 5s
     GossipInterval time.Duration
 
     // Number of peers contacted per gossip round.
     // Default: 3
     GossipFanout int
 
+    // How long this node waits before cancelling a heartbeat to a peer.
+    // Default: 300ms
+    GossipTimeout time.Duration
+
     // How long to wait after a topology change before rebalancing.
     // Prevents cascading migrations when multiple nodes join or leave at once.
     // Default: 500ms
     RebalanceDebounce time.Duration
+
+    // Max number of migrated keys sent per rebalance frame.
+    // Default: 128
+    RebalanceBatchSize int
+
+    // Max number of queued-but-unsent replication writes held per peer
+    // before writes to that peer start blocking (backpressure).
+    // Default: 4096
+    ReplicationQueueSize int
+
+    // Max number of queued replication writes sent to a peer in one batch.
+    // Default: 256
+    ReplicationBatchSize int
 
     // How often the cluster janitor runs to evict expired store entries
     // and remove dead peer tombstones from the membership table.
@@ -329,6 +373,11 @@ hive.Config{
     // nil defaults to slog.LevelError (quiet).
     // Set to &slog.LevelInfo or &slog.LevelDebug for more detail.
     LogLevel *slog.Level
+
+    // Enables TLS for cluster-mode peer connections when non-nil.
+    // nil disables TLS (default, plaintext). Build one with
+    // NewClusterTLSConfig, or construct your own *tls.Config.
+    TLSConfig *tls.Config
 }
 ```
 
@@ -338,7 +387,8 @@ Hive is an **ephemeral, eventually consistent** cache.
 
 - Reads and writes go to the key's primary owner as determined by consistent hashing
 - Replication is asynchronous — replicas may be briefly behind the primary
-- When a network partition heals and keys are redistributed, Hive uses **last-write-wins (LWW)** conflict resolution: every stored entry carries a nanosecond-precision write timestamp (`writeAt`), and rebalance only overwrites a local copy if the incoming entry is strictly newer. This prevents split-brain partitions from silently clobbering fresher data.
+- Replication to each replica is ordered and applies backpressure if that replica falls behind (tunable via `ReplicationQueueSize`/`ReplicationBatchSize`), bounding memory and goroutine growth under load at the cost of writes occasionally waiting on a struggling replica rather than silently drifting out of order
+- When a network partition heals and keys are redistributed, Hive uses **last-write-wins (LWW)** conflict resolution: every stored entry carries a second-precision write timestamp (`mtime`), and rebalance only overwrites a local copy if the incoming entry is strictly newer. This prevents split-brain partitions from silently clobbering fresher data.
 - There is no durability — a node restart loses its local data. Surviving replicas retain their copies
 
 This makes Hive well-suited for session caches, rate-limit counters, presence tracking, leaderboards, job queues, and other short-lived shared state where occasional staleness is acceptable.
@@ -364,6 +414,8 @@ Nodes that fail to respond to a heartbeat are marked dead immediately. Their key
 
 The hash ring uses virtual nodes (vnodes) to distribute keyspace. Each node's vnode count is derived from its `MemLimit` relative to the rest of the cluster: a node with twice the memory of its peers owns roughly twice as much keyspace. This means data naturally flows toward nodes with more capacity without any manual weighting.
 
+A node configured with `hive.Bytes(0)` gets exactly zero vnodes — it joins the cluster and participates in gossip like any other node, but never becomes a primary or replica for any key. Reads and writes routed through it are always forwarded to the nodes that actually own the data. This is useful for a pure routing/relay worker, or for setting up benchmarks that pay the same network hop a client of a separate networked cache (e.g. Redis) always pays.
+
 ### Janitor
 
 A background janitor runs every `CleanupInterval` and performs two tasks:
@@ -373,7 +425,7 @@ A background janitor runs every `CleanupInterval` and performs two tasks:
 
 ### Split-brain recovery
 
-Each stored entry carries a `writeAt` timestamp (Unix nanoseconds, set at the time of the write). When rebalancing after a partition heals, incoming entries are written only if their `writeAt` is strictly newer than the local copy. This last-write-wins strategy ensures the most recently written value survives without requiring coordination between nodes.
+Each stored entry carries an `mtime` timestamp (Unix seconds, set at the time of the write). When rebalancing after a partition heals, incoming entries are written only if their `mtime` is strictly newer than the local copy. This last-write-wins strategy ensures the most recently written value survives without requiring coordination between nodes.
 
 ## Operational notes
 

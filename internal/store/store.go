@@ -95,7 +95,7 @@ type DataStore struct {
 	shards      []*shard
 	shardsCount uint64
 	used        atomic.Int64 // global byte estimate across all shards
-	capacity    int64        // global byte cap; 0 = unlimited, read-only after init
+	capacity    int64        // global byte cap, enforced literally; read-only after init
 	decoders    map[Kind]DecodeFunc
 }
 
@@ -163,12 +163,12 @@ func (ds *DataStore) upsertEntry(s *shard, key string, e DataStructure) error {
 
 	if old, ok := s.data[key]; ok {
 		delta := size - old.cachedSize()
-		if delta > 0 && ds.capacity > 0 && ds.used.Load()+delta > ds.capacity {
+		if delta > 0 && ds.used.Load()+delta > ds.capacity {
 			return ErrCapacityExceeded
 		}
 		ds.used.Add(delta)
 	} else {
-		if ds.capacity > 0 && ds.used.Load()+size > ds.capacity {
+		if ds.used.Load()+size > ds.capacity {
 			return ErrCapacityExceeded
 		}
 		ds.used.Add(size)
@@ -278,12 +278,12 @@ func (ds *DataStore) ApplyIfNewer(key string, incoming DataStructure) error {
 	size := int64(len(key)) + incoming.ByteSize() + entryOverhead
 	if exists {
 		delta := size - existing.cachedSize()
-		if delta > 0 && ds.capacity > 0 && ds.used.Load()+delta > ds.capacity {
+		if delta > 0 && ds.used.Load()+delta > ds.capacity {
 			return ErrCapacityExceeded
 		}
 		ds.used.Add(delta)
 	} else {
-		if ds.capacity > 0 && ds.used.Load()+size > ds.capacity {
+		if ds.used.Load()+size > ds.capacity {
 			return ErrCapacityExceeded
 		}
 		ds.used.Add(size)

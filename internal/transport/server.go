@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 )
 
 // Handler processes an inbound message and returns a response payload and an
@@ -18,6 +19,8 @@ type Server struct {
 	ln      net.Listener
 	handler Handler
 	stop    chan struct{}
+	mu      sync.Mutex
+	conns   map[net.Conn]struct{}
 }
 
 // NewServer creates a TCP server bound to addr. If tlsConfig is non-nil,
@@ -33,7 +36,7 @@ func NewServer(addr string, handler Handler, tlsConfig *tls.Config) (*Server, er
 	if err != nil {
 		return nil, fmt.Errorf("transport: listen %s: %w", addr, err)
 	}
-	return &Server{ln: ln, handler: handler, stop: make(chan struct{})}, nil
+	return &Server{ln: ln, handler: handler, stop: make(chan struct{}), conns: make(map[net.Conn]struct{})}, nil
 }
 
 // Addr returns the address the server is listening on.
@@ -62,7 +65,15 @@ func (s *Server) Serve() {
 // Each frame is dispatched concurrently; the response is written back with the
 // same ID so the remote mux can route it to the correct waiting goroutine.
 func (s *Server) handleConn(conn net.Conn) {
-	defer conn.Close()
+	s.mu.Lock()
+	s.conns[conn] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.conns, conn)
+		s.mu.Unlock()
+		conn.Close()
+	}()
 
 	r := bufio.NewReader(conn)
 	w := newFrameWriter(conn)
@@ -88,8 +99,22 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-// Close stops the server.
+// Close stops the server: it stops accepting new connections and closes
+// every connection already accepted, so peers see this node disappear
+// promptly instead of waiting on a connection nothing will answer.
 func (s *Server) Close() error {
 	close(s.stop)
-	return s.ln.Close()
+	err := s.ln.Close()
+
+	s.mu.Lock()
+	conns := make([]net.Conn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+	for _, c := range conns {
+		c.Close()
+	}
+
+	return err
 }
