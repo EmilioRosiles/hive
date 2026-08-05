@@ -118,3 +118,53 @@ func BenchmarkForwardResponse_UnmarshalMsgpack(b *testing.B) {
 		}
 	}
 }
+
+func benchForwardBatch() ForwardBatch {
+	requests := make([]ForwardRequest, 16)
+	for i := range requests {
+		requests[i] = benchForwardRequest()
+	}
+	return ForwardBatch{Requests: requests}
+}
+
+func BenchmarkForwardBatch_MarshalBinary(b *testing.B) {
+	batch := benchForwardBatch()
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := batch.MarshalBinary(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkForwardBatch_MarshalMsgpack(b *testing.B) {
+	batch := benchForwardBatch()
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := msgpack.Marshal(batch); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkForwardBatch_UnmarshalBinary(b *testing.B) {
+	data, _ := benchForwardBatch().MarshalBinary()
+	b.ReportAllocs()
+	for b.Loop() {
+		var batch ForwardBatch
+		if err := batch.UnmarshalBinary(data); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkForwardBatch_UnmarshalMsgpack(b *testing.B) {
+	data, _ := msgpack.Marshal(benchForwardBatch())
+	b.ReportAllocs()
+	for b.Loop() {
+		var batch ForwardBatch
+		if err := msgpack.Unmarshal(data, &batch); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

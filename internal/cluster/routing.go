@@ -15,6 +15,8 @@ func (m *Cluster) handleFrame(msgType transport.MsgType, payload []byte) ([]byte
 		return m.handleHeartbeat(payload)
 	case transport.MsgForward:
 		return m.handleForward(payload)
+	case transport.MsgForwardBatch:
+		return nil, m.handleForwardBatch(payload)
 	case transport.MsgRebalance:
 		return m.handleRebalance(payload)
 	case transport.MsgLeave:
@@ -44,11 +46,36 @@ func (m *Cluster) handleForward(payload []byte) ([]byte, error) {
 	return transport.Encode(transport.ForwardResponse{Results: results})
 }
 
+// handleForwardBatch decodes a batch of replicated ops and applies each one
+// in order. Every entry is applied even if an earlier one fails, so one bad
+// op doesn't stop the rest of the batch from reaching the replica; the first
+// error encountered (if any) is returned so the sender still learns of it.
+func (m *Cluster) handleForwardBatch(payload []byte) error {
+	var batch transport.ForwardBatch
+	if err := transport.Decode(payload, &batch); err != nil {
+		return fmt.Errorf("handler: decode forward batch: %w", err)
+	}
+	var firstErr error
+	for _, req := range batch.Requests {
+		def, ok := opRegistry[req.Op]
+		if !ok {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("handler: unknown op %d", req.Op)
+			}
+			continue
+		}
+		if _, err := def.Exec(m, req.Key, req.Args); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // dispatch routes op to the correct node(s) and executes it.
 //
 //   - ScopeRead:  execute locally if responsible, otherwise forward to primary.
 //   - ScopeWrite: sync write to primary (exec locally if we are primary, forward otherwise),
-//     then async replicate to replicas (nodes[1:]).
+//     then queue replication to replicas (nodes[1:]).
 //   - ScopeLocal: always execute on this node regardless of ring ownership.
 func (m *Cluster) dispatch(op transport.Op, key string, args ...[]byte) ([][]byte, error) {
 	def, ok := opRegistry[op]
@@ -94,26 +121,20 @@ func (m *Cluster) execOrForward(def opDef, op transport.Op, key string, args [][
 	return resp.Results, nil
 }
 
-// fanOutReplicas asynchronously delivers req to each node in nodes.
-// If a node is this node it executes locally (replica write); otherwise it
-// sends over the network. nodes is typically nodes[1:] from the ring so the
-// primary (nodes[0]) is never duplicated here.
+// fanOutReplicas delivers req to each node in nodes. A node that is this node
+// executes the op synchronously (no network I/O involved); a remote node's
+// write is queued on its replicator, which applies queued writes to that
+// peer in order. nodes is typically nodes[1:] from the ring so the primary
+// (nodes[0]) is never duplicated here.
 func (m *Cluster) fanOutReplicas(def opDef, req transport.ForwardRequest, nodes []string) {
-	if len(nodes) == 0 {
-		return
-	}
 	for _, nodeID := range nodes {
-		go func() {
-			if nodeID == m.cfg.NodeID {
-				def.Exec(m, req.Key, req.Args)
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RoutingTimeout)
-			if _, err := m.sendForward(ctx, nodeID, req); err != nil {
-				m.markDead(nodeID)
-			}
-			cancel()
-		}()
+		if nodeID == m.cfg.NodeID {
+			def.Exec(m, req.Key, req.Args)
+			continue
+		}
+		if rep, ok := m.getReplicator(nodeID); ok {
+			rep.enqueue(req)
+		}
 	}
 }
 
@@ -138,6 +159,22 @@ func (m *Cluster) sendForward(ctx context.Context, nodeID string, req transport.
 		}
 	}
 	return resp, nil
+}
+
+// sendForwardBatch encodes and sends a batch of queued replication writes to
+// nodeID. Replication never reads the results of a write, so unlike
+// sendForward there is no response payload to decode — only success/failure.
+func (m *Cluster) sendForwardBatch(ctx context.Context, nodeID string, batch []transport.ForwardRequest) error {
+	client, ok := m.getClient(nodeID)
+	if !ok {
+		return fmt.Errorf("cluster: no client for node %s", nodeID)
+	}
+	framePayload, err := transport.Encode(transport.ForwardBatch{Requests: batch})
+	if err != nil {
+		return err
+	}
+	_, err = client.Send(ctx, transport.Frame{Type: transport.MsgForwardBatch, Payload: framePayload})
+	return err
 }
 
 // Exec is the exported entry point for store files to run a cluster op.

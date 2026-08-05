@@ -138,9 +138,8 @@ func (m *Cluster) sendRebalanceBatch(nodeID string, entries []transport.Rebalanc
 		return
 	}
 
-	const batchSize = 100
-	for i := 0; i < len(entries); i += batchSize {
-		end := min(i+batchSize, len(entries))
+	for i := 0; i < len(entries); i += m.cfg.RebalanceBatchSize {
+		end := min(i+m.cfg.RebalanceBatchSize, len(entries))
 		batch := transport.RebalanceBatch{Entries: entries[i:end]}
 		payload, err := transport.Encode(batch)
 		if err != nil {

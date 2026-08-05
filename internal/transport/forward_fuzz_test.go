@@ -25,3 +25,18 @@ func FuzzForwardResponseUnmarshal(f *testing.F) {
 		_ = resp.UnmarshalBinary(data)
 	})
 }
+
+func FuzzForwardBatchUnmarshal(f *testing.F) {
+	seed, _ := (ForwardBatch{Requests: []ForwardRequest{
+		{Op: OpValueSet, Key: "k", Args: [][]byte{[]byte("v")}},
+		{Op: OpValueGet, Key: "k2"},
+	}}).MarshalBinary()
+	f.Add(seed)
+	f.Add([]byte("garbage"))
+	f.Add([]byte(""))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var batch ForwardBatch
+		_ = batch.UnmarshalBinary(data) // only requirement: must not panic
+	})
+}

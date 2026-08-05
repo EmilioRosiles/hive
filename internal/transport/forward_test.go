@@ -120,6 +120,93 @@ func TestForwardResponse_RoundTrip_MultipleResults(t *testing.T) {
 	}
 }
 
+// -- ForwardBatch --
+
+func TestForwardBatch_RoundTrip_Empty(t *testing.T) {
+	batch := ForwardBatch{}
+	data, err := batch.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary: %v", err)
+	}
+	var got ForwardBatch
+	if err := got.UnmarshalBinary(data); err != nil {
+		t.Fatalf("UnmarshalBinary: %v", err)
+	}
+	if len(got.Requests) != 0 {
+		t.Errorf("got %d requests, want 0", len(got.Requests))
+	}
+}
+
+func TestForwardBatch_RoundTrip_MultipleRequests(t *testing.T) {
+	batch := ForwardBatch{Requests: []ForwardRequest{
+		{Op: OpValueSet, Key: "a", Args: [][]byte{[]byte("1")}},
+		{Op: OpHSet, Key: "b", Args: [][]byte{[]byte("field"), []byte("value")}},
+		{Op: OpValueGet, Key: "c"},
+	}}
+	data, err := batch.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary: %v", err)
+	}
+	var got ForwardBatch
+	if err := got.UnmarshalBinary(data); err != nil {
+		t.Fatalf("UnmarshalBinary: %v", err)
+	}
+	if len(got.Requests) != len(batch.Requests) {
+		t.Fatalf("got %d requests, want %d", len(got.Requests), len(batch.Requests))
+	}
+	for i := range batch.Requests {
+		want, got := batch.Requests[i], got.Requests[i]
+		if got.Op != want.Op || got.Key != want.Key || len(got.Args) != len(want.Args) {
+			t.Fatalf("request %d: got %+v, want %+v", i, got, want)
+		}
+		for j := range want.Args {
+			if !bytes.Equal(got.Args[j], want.Args[j]) {
+				t.Errorf("request %d arg %d: got %v, want %v", i, j, got.Args[j], want.Args[j])
+			}
+		}
+	}
+}
+
+func TestForwardBatch_Unmarshal_EmptyInput(t *testing.T) {
+	var batch ForwardBatch
+	if err := batch.UnmarshalBinary(nil); err == nil {
+		t.Error("expected error for empty input")
+	}
+}
+
+func TestForwardBatch_Unmarshal_TruncatedMidElement(t *testing.T) {
+	full := ForwardBatch{Requests: []ForwardRequest{
+		{Op: OpValueSet, Key: "a", Args: [][]byte{[]byte("1")}},
+		{Op: OpValueSet, Key: "b", Args: [][]byte{[]byte("2")}},
+	}}
+	data, _ := full.MarshalBinary()
+	truncated := data[:len(data)-2]
+
+	var batch ForwardBatch
+	if err := batch.UnmarshalBinary(truncated); err == nil {
+		t.Error("expected error for truncated payload")
+	}
+}
+
+func TestForwardBatch_Unmarshal_TrailingGarbage(t *testing.T) {
+	full := ForwardBatch{Requests: []ForwardRequest{{Op: OpValueSet, Key: "a"}}}
+	data, _ := full.MarshalBinary()
+	data = append(data, 0xFF, 0xFF)
+
+	var batch ForwardBatch
+	if err := batch.UnmarshalBinary(data); err == nil {
+		t.Error("expected error for trailing garbage")
+	}
+}
+
+func TestForwardBatch_Unmarshal_HugeRequestCount_RejectedFast(t *testing.T) {
+	data := []byte{0xFF, 0xFF, 0xFF, 0xFF}
+	var batch ForwardBatch
+	if err := batch.UnmarshalBinary(data); err == nil {
+		t.Error("expected error for oversized request count")
+	}
+}
+
 // -- malformed/truncated input --
 
 func TestForwardRequest_Unmarshal_EmptyInput(t *testing.T) {

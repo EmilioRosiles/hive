@@ -24,7 +24,7 @@ type Stream struct {
 // -- node helpers --
 
 // standalone returns a cache backed by a single local node with no networking.
-func standalone(t *testing.T) *hive.Cache {
+func standalone(t testing.TB) *hive.Cache {
 	t.Helper()
 	node, err := hive.NewNode(hive.Config{})
 	if err != nil {
@@ -36,7 +36,7 @@ func standalone(t *testing.T) *hive.Cache {
 
 // clusterNode starts a cluster-mode node and returns its node and cache.
 // The node is shut down automatically when the test ends.
-func clusterNode(t *testing.T, seeds []string, rf int) (*hive.Node, *hive.Cache) {
+func clusterNode(t testing.TB, seeds []string, rf int) (*hive.Node, *hive.Cache) {
 	t.Helper()
 	node, err := hive.NewNode(hive.Config{
 		Mode:              hive.ModeCluster,
@@ -62,7 +62,7 @@ func addr(n *hive.Node) string {
 }
 
 // freePort returns an available TCP port on localhost.
-func freePort(t *testing.T) int {
+func freePort(t testing.TB) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -74,7 +74,7 @@ func freePort(t *testing.T) int {
 }
 
 // waitFor polls condition every 20ms until it returns true or timeout elapses.
-func waitFor(t *testing.T, timeout time.Duration, msg string, condition func() bool) {
+func waitFor(t testing.TB, timeout time.Duration, msg string, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

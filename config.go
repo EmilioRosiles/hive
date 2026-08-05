@@ -73,6 +73,19 @@ type Config struct {
 	// Defaults to 500ms.
 	RebalanceDebounce time.Duration
 
+	// RebalanceBatchSize is the max number of migrated keys sent per rebalance
+	// frame. Defaults to 128.
+	RebalanceBatchSize int
+
+	// ReplicationQueueSize is the max number of queued-but-unsent replication
+	// writes held per peer before enqueuing blocks (backpressure).
+	// Defaults to 4096.
+	ReplicationQueueSize int
+
+	// ReplicationBatchSize is the max number of queued replication writes sent
+	// to a peer in one batch. Defaults to 256.
+	ReplicationBatchSize int
+
 	// CleanupInterval is how often the cluster janitor runs to evict dead peer
 	// tombstones and expired store entries.
 	// Default: 30s
@@ -86,17 +99,20 @@ type Config struct {
 
 func defaultConfig() Config {
 	return Config{
-		Mode:              ModeStandalone,
-		BindAddr:          "0.0.0.0",
-		BindPort:          7946,
-		RoutingTimeout:    1 * time.Second,
-		ReplicationFactor: 1,
-		MemLimit:          sys.TotalMemory(),
-		GossipInterval:    5 * time.Second,
-		GossipFanout:      3,
-		GossipTimeout:     300 * time.Millisecond,
-		RebalanceDebounce: 500 * time.Millisecond,
-		CleanupInterval:   30 * time.Second,
+		Mode:                 ModeStandalone,
+		BindAddr:             "0.0.0.0",
+		BindPort:             7946,
+		RoutingTimeout:       1 * time.Second,
+		ReplicationFactor:    1,
+		MemLimit:             sys.TotalMemory(),
+		GossipInterval:       5 * time.Second,
+		GossipFanout:         3,
+		GossipTimeout:        300 * time.Millisecond,
+		RebalanceDebounce:    500 * time.Millisecond,
+		RebalanceBatchSize:   128,
+		ReplicationQueueSize: 4096,
+		ReplicationBatchSize: 256,
+		CleanupInterval:      30 * time.Second,
 	}
 }
 
@@ -128,6 +144,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RebalanceDebounce == 0 {
 		c.RebalanceDebounce = d.RebalanceDebounce
+	}
+	if c.RebalanceBatchSize == 0 {
+		c.RebalanceBatchSize = d.RebalanceBatchSize
+	}
+	if c.ReplicationQueueSize == 0 {
+		c.ReplicationQueueSize = d.ReplicationQueueSize
+	}
+	if c.ReplicationBatchSize == 0 {
+		c.ReplicationBatchSize = d.ReplicationBatchSize
 	}
 	if c.MemLimit == 0 {
 		c.MemLimit = d.MemLimit
