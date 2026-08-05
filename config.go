@@ -114,11 +114,17 @@ func (c *Config) applyDefaults() {
 	if c.ReplicationFactor == 0 {
 		c.ReplicationFactor = d.ReplicationFactor
 	}
+	if c.RoutingTimeout == 0 {
+		c.RoutingTimeout = d.RoutingTimeout
+	}
 	if c.GossipInterval == 0 {
 		c.GossipInterval = d.GossipInterval
 	}
 	if c.GossipFanout == 0 {
 		c.GossipFanout = d.GossipFanout
+	}
+	if c.GossipTimeout == 0 {
+		c.GossipTimeout = d.GossipTimeout
 	}
 	if c.RebalanceDebounce == 0 {
 		c.RebalanceDebounce = d.RebalanceDebounce

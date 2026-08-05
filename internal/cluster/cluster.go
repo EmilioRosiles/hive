@@ -100,8 +100,6 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		go m.startGossip()
 	}
 
-	m.rebalancer.lastRing = m.ring.Copy()
-
 	slog.Info("hive: node started", "node", cfg.NodeID, "clustered", cfg.Clustered)
 	return m, nil
 }
@@ -213,12 +211,26 @@ func (m *Cluster) evictDeadPeers() {
 	}
 }
 
-// getPeer returns a peer by node ID.
+// getPeer returns a peer by node ID. The returned *PeerInfo is the live,
+// mutable entry shared with other goroutines — callers must hold m.mu before
+// touching its fields. Prefer peerStatus for a simple status check.
 func (m *Cluster) getPeer(nodeID string) (*PeerInfo, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	p, ok := m.peers[nodeID]
 	return p, ok
+}
+
+// peerStatus returns nodeID's current status as a locked, point-in-time
+// snapshot, safe to read without further synchronization.
+func (m *Cluster) peerStatus(nodeID string) (NodeStatus, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.peers[nodeID]
+	if !ok {
+		return 0, false
+	}
+	return p.Status, true
 }
 
 // getClient returns the transport client for a peer node ID.

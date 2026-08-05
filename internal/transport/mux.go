@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -8,8 +9,6 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
-
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 var errMuxClosed = errors.New("mux: connection closed")
@@ -20,14 +19,15 @@ type ErrRejected struct{ msg string }
 
 func (e *ErrRejected) Error() string { return e.msg }
 
-// mux multiplexes concurrent request/response pairs over a single TCP connection.
-// One readLoop goroutine reads all inbound frames and dispatches each response
-// to the goroutine that sent the matching request.
+// mux multiplexes concurrent request/response pairs over a single TCP
+// connection. One readLoop goroutine reads all inbound frames and routes
+// each response, by frame.ID, to the goroutine that sent the matching
+// request. Server doesn't need this: it only ever answers the specific frame
+// it just read, with nothing to correlate.
 type mux struct {
 	conn    net.Conn
-	enc     *msgpack.Encoder
-	encMu   sync.Mutex // serializes writes; encoder is not goroutine-safe
-	pending sync.Map   // map[uint32]chan Frame
+	w       *frameWriter
+	pending sync.Map // map[uint32]chan Frame
 	nextID  atomic.Uint32
 	done    chan struct{}
 	once    sync.Once
@@ -36,7 +36,7 @@ type mux struct {
 func newMux(conn net.Conn) *mux {
 	m := &mux{
 		conn: conn,
-		enc:  msgpack.NewEncoder(conn),
+		w:    newFrameWriter(conn),
 		done: make(chan struct{}),
 	}
 	go m.readLoop()
@@ -52,10 +52,7 @@ func (m *mux) send(ctx context.Context, frame Frame) (Frame, error) {
 	ch := make(chan Frame, 1)
 	m.pending.Store(id, ch)
 
-	m.encMu.Lock()
-	err := m.enc.Encode(frame)
-	m.encMu.Unlock()
-
+	err := m.w.write(frame)
 	if err != nil {
 		m.pending.Delete(id)
 		m.shutdown(err)
@@ -80,10 +77,10 @@ func (m *mux) send(ctx context.Context, frame Frame) (Frame, error) {
 // readLoop reads frames from the connection and routes each to its waiting sender.
 // Returns when the connection is closed or errors.
 func (m *mux) readLoop() {
-	dec := msgpack.NewDecoder(m.conn)
+	r := bufio.NewReader(m.conn)
 	for {
-		var frame Frame
-		if err := dec.Decode(&frame); err != nil {
+		frame, err := ReadFrame(r)
+		if err != nil {
 			m.shutdown(err)
 			return
 		}

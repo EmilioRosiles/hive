@@ -1,16 +1,14 @@
 package transport
 
 import (
+	"bufio"
 	"fmt"
 	"log/slog"
 	"net"
-	"sync"
-
-	"github.com/vmihailenco/msgpack/v5"
 )
 
-// Handler processes an inbound message and returns a response payload (gob-encoded)
-// and an error. Returning a nil payload sends an empty response.
+// Handler processes an inbound message and returns a response payload and an
+// error. Returning a nil payload sends an empty response.
 type Handler func(msgType MsgType, payload []byte) ([]byte, error)
 
 // Server listens for inbound peer connections and dispatches frames to a Handler.
@@ -58,13 +56,12 @@ func (s *Server) Serve() {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
-	dec := msgpack.NewDecoder(conn)
-	enc := msgpack.NewEncoder(conn)
-	var encMu sync.Mutex
+	r := bufio.NewReader(conn)
+	w := newFrameWriter(conn)
 
 	for {
-		var frame Frame
-		if err := dec.Decode(&frame); err != nil {
+		frame, err := ReadFrame(r)
+		if err != nil {
 			// Connection closed or peer went away — normal exit.
 			return
 		}
@@ -76,11 +73,9 @@ func (s *Server) handleConn(conn net.Conn) {
 				slog.Warn(fmt.Sprintf("transport: handler error (type=%d): %v", f.Type, handlerErr))
 				resp.Err = handlerErr.Error()
 			}
-			encMu.Lock()
-			if err := enc.Encode(resp); err != nil {
+			if err := w.write(resp); err != nil {
 				slog.Warn(fmt.Sprintf("transport: encode response: %v", err))
 			}
-			encMu.Unlock()
 		}(frame)
 	}
 }
