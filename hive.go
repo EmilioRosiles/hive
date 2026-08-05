@@ -75,6 +75,7 @@ func NewNode(cfg Config) (*Node, error) {
 		ReplicationBatchSize: cfg.ReplicationBatchSize,
 		CleanupInterval:      cfg.CleanupInterval,
 		Clustered:            cfg.Mode == ModeCluster,
+		TLSConfig:            cfg.TLSConfig,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hive: start cluster manager: %w", err)

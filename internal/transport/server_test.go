@@ -23,7 +23,7 @@ func echoHandler(t *testing.T, responses map[MsgType][]byte) (Handler, func() []
 
 func startTestServer(t *testing.T, handler Handler) *Server {
 	t.Helper()
-	s, err := NewServer("127.0.0.1:0", handler)
+	s, err := NewServer("127.0.0.1:0", handler, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

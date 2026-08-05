@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -19,9 +20,16 @@ type Server struct {
 	stop    chan struct{}
 }
 
-// NewServer creates a TCP server bound to addr.
-func NewServer(addr string, handler Handler) (*Server, error) {
-	ln, err := net.Listen("tcp", addr)
+// NewServer creates a TCP server bound to addr. If tlsConfig is non-nil,
+// connections are accepted over TLS using it; nil means plaintext.
+func NewServer(addr string, handler Handler, tlsConfig *tls.Config) (*Server, error) {
+	var ln net.Listener
+	var err error
+	if tlsConfig != nil {
+		ln, err = tls.Listen("tcp", addr, tlsConfig)
+	} else {
+		ln, err = net.Listen("tcp", addr)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("transport: listen %s: %w", addr, err)
 	}
