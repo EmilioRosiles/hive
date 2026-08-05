@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -8,8 +9,6 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
-
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 var errMuxClosed = errors.New("mux: connection closed")
@@ -25,8 +24,8 @@ func (e *ErrRejected) Error() string { return e.msg }
 // to the goroutine that sent the matching request.
 type mux struct {
 	conn    net.Conn
-	enc     *msgpack.Encoder
-	encMu   sync.Mutex // serializes writes; encoder is not goroutine-safe
+	w       *bufio.Writer
+	encMu   sync.Mutex // serializes writes; bufio.Writer is not goroutine-safe
 	pending sync.Map   // map[uint32]chan Frame
 	nextID  atomic.Uint32
 	done    chan struct{}
@@ -36,7 +35,7 @@ type mux struct {
 func newMux(conn net.Conn) *mux {
 	m := &mux{
 		conn: conn,
-		enc:  msgpack.NewEncoder(conn),
+		w:    bufio.NewWriter(conn),
 		done: make(chan struct{}),
 	}
 	go m.readLoop()
@@ -53,7 +52,10 @@ func (m *mux) send(ctx context.Context, frame Frame) (Frame, error) {
 	m.pending.Store(id, ch)
 
 	m.encMu.Lock()
-	err := m.enc.Encode(frame)
+	err := WriteFrame(m.w, frame)
+	if err == nil {
+		err = m.w.Flush()
+	}
 	m.encMu.Unlock()
 
 	if err != nil {
@@ -80,10 +82,10 @@ func (m *mux) send(ctx context.Context, frame Frame) (Frame, error) {
 // readLoop reads frames from the connection and routes each to its waiting sender.
 // Returns when the connection is closed or errors.
 func (m *mux) readLoop() {
-	dec := msgpack.NewDecoder(m.conn)
+	r := bufio.NewReader(m.conn)
 	for {
-		var frame Frame
-		if err := dec.Decode(&frame); err != nil {
+		frame, err := ReadFrame(r)
+		if err != nil {
 			m.shutdown(err)
 			return
 		}

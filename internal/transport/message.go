@@ -12,11 +12,22 @@ const (
 	MsgProbe                        // indirect reachability probe
 )
 
-// Frame is the envelope wrapping every message on the wire.
+// Frame is the envelope wrapping every message on the wire. It is written and
+// read via WriteFrame/ReadFrame (see frame.go) as a fixed 10-byte binary
+// header followed by the payload bytes — there is no version/magic byte,
+// since this is a private protocol between nodes of one cluster running the
+// same build, not a format shared with external or mixed-version clients.
+//
+// A single frame can carry Payload or Err, never both: if Err is set when
+// writing, its bytes are sent as the payload and Payload is ignored. This
+// holds for every handler in this package today (a non-nil error always
+// comes with a nil response payload).
 type Frame struct {
-	ID      uint32 // request ID used to match responses on a multiplexed connection
-	Type    MsgType
-	Payload []byte // msgpack-encoded message body
+	ID   uint32 // request ID used to match responses on a multiplexed connection
+	Type MsgType
+	// Payload is the message body — binary-encoded for MsgForward/MsgRebalance
+	// (see binary.go), msgpack-encoded for MsgHeartbeat/MsgLeave (see codec.go).
+	Payload []byte
 	Err     string // non-empty if the handler returned an error
 }
 
@@ -97,6 +108,7 @@ const (
 
 // ForwardRequest asks the receiving node to execute an operation locally.
 // Args are positional raw byte slots — no intermediate struct encoding.
+// Wire encoding: see MarshalBinary/UnmarshalBinary in binary.go.
 type ForwardRequest struct {
 	Op   Op
 	Key  string
@@ -106,6 +118,7 @@ type ForwardRequest struct {
 // ForwardResponse carries the result of a forwarded operation.
 // Results are positional raw byte slots matching the op's return layout.
 // Write ops return nil. Read ops return one or more slots.
+// Wire encoding: see MarshalBinary/UnmarshalBinary in binary.go.
 type ForwardResponse struct {
 	Results [][]byte
 }
@@ -120,6 +133,9 @@ type RebalanceEntry struct {
 	TTL  int64 // nanoseconds until expiry from time of send; 0 means no TTL
 }
 
+// Wire encoding: see MarshalBinary/UnmarshalBinary in binary.go. RebalanceEntry
+// never travels alone on the wire, so it has no encoding methods of its own —
+// its layout is inlined directly into RebalanceBatch's.
 type RebalanceBatch struct {
 	Entries []RebalanceEntry
 }
