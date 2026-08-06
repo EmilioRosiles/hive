@@ -393,6 +393,20 @@ Hive is an **ephemeral, eventually consistent** cache.
 
 This makes Hive well-suited for session caches, rate-limit counters, presence tracking, leaderboards, job queues, and other short-lived shared state where occasional staleness is acceptable.
 
+## Performance
+
+Single-machine micro-benchmarks, AMD Ryzen 5 5600X (6 cores / 12 threads). A snapshot of specific, narrow dimensions, not a general performance claim. Standalone (see [Standalone](#standalone-single-instance)) is a same-process call, no network. Cluster mode is measured across a real network hop: a 3-node cluster (RF=2) where the benchmark driver only ever talks to a node configured with `MemLimit: hive.Bytes(0)` (see [Configuration](#configuration)) — a node that owns no keyspace of its own, so every operation is forwarded to whichever of the other two nodes actually owns the key. Throughput is the reciprocal of latency (`1s / ns per op`); for the concurrent rows that's aggregate ops/sec across all 12 goroutines, not per-goroutine.
+
+| Metric | Standalone | Cluster mode (cross-node) |
+|---|---|---|
+| SET, single-threaded | ~593 ns/op (~1.69M ops/sec) | ~37 μs/op (~27.0K ops/sec) |
+| GET, single-threaded | ~539 ns/op (~1.86M ops/sec) | ~36 μs/op (~27.8K ops/sec) |
+| SET, 12-way concurrent | ~155 ns/op (~6.45M ops/sec) | ~177 μs/op (~5.65K ops/sec) |
+| GET, 12-way concurrent | ~127 ns/op (~7.87M ops/sec) | ~185 μs/op (~5.41K ops/sec) |
+| Idle memory footprint | ~118–120 KB heap | ~650–750 KB heap (3-node formed cluster, per node) |
+
+Idle memory is the incremental heap added to the host process (`runtime.MemStats`, GC-settled), measured after construction. Clustering machinery itself (TCP listener, gossip loop, janitor) costs about the same as standalone until peers actually join — a lone node with no peers yet sits at ~120–123 KB, same order as standalone. Each known peer then adds roughly 260–310 KB — a ring-vnode slice, a persistent client connection, a replicator queue, and gossip membership state.
+
 ## Data types
 
 Values must be serializable by [`msgpack`](https://github.com/vmihailenco/msgpack):

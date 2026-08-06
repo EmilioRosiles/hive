@@ -120,6 +120,17 @@ func (m *Cluster) Shutdown() error {
 			m.announceLeave()
 			err = m.server.Close()
 		}
+
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		for _, rep := range m.replicators {
+			rep.stop()
+		}
+
+		for _, c := range m.clients {
+			c.Close()
+		}
 	})
 	return err
 }
