@@ -78,6 +78,28 @@ func clusterNodeTLS(t testing.TB, seeds []string, rf int, tlsConfig *tls.Config)
 	return node, node.Cache()
 }
 
+// clusterNodeWithMemLimit mirrors clusterNode but with an explicit MemLimit —
+// e.g. hive.Bytes(0) for a pure routing/relay worker that owns no keyspace.
+func clusterNodeWithMemLimit(t testing.TB, seeds []string, rf int, memLimit hive.MemLimit) (*hive.Node, *hive.Cache) {
+	t.Helper()
+	node, err := hive.NewNode(hive.Config{
+		Mode:              hive.ModeCluster,
+		BindAddr:          "127.0.0.1",
+		BindPort:          freePort(t),
+		Seeds:             seeds,
+		ReplicationFactor: rf,
+		MemLimit:          memLimit,
+		GossipInterval:    100 * time.Millisecond,
+		GossipFanout:      3,
+		RebalanceDebounce: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("clusterNodeWithMemLimit: %v", err)
+	}
+	t.Cleanup(func() { node.Shutdown() })
+	return node, node.Cache()
+}
+
 // addr returns the bind address of a cluster node.
 func addr(n *hive.Node) string {
 	s := n.Status()

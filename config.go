@@ -51,11 +51,13 @@ type Config struct {
 	// routed op (redirect/replicate).
 	RoutingTimeout time.Duration
 
-	// MemLimit is the maximum memory this node intends to use, in bytes.
+	// MemLimit is the maximum memory this node intends to use.
 	// It is used to compute the node's virtual node count on the hash ring:
 	// nodes with more memory receive proportionally more keyspace.
-	// A value of 0 uses the default of 100 virtual nodes.
-	MemLimit uint64
+	// nil (the zero value) means "use total system memory" (default).
+	// Use Bytes(0) for a node that owns no keyspace at all — a pure
+	// routing/relay worker that never stores or replicates data itself.
+	MemLimit MemLimit
 
 	// GossipInterval is how often this node sends heartbeats to peers.
 	// Defaults to 1s.
@@ -104,6 +106,24 @@ type Config struct {
 	TLSConfig *tls.Config
 }
 
+// Byte-size units for use with Bytes, e.g. hive.Bytes(4 * hive.GB).
+const (
+	KB uint64 = 1 << 10
+	MB uint64 = 1 << 20
+	GB uint64 = 1 << 30
+)
+
+// MemLimit is the maximum memory a node intends to use, in bytes.
+// The zero value (nil) means "use total system memory" (default).
+// Use Bytes(0) for a node that owns no keyspace at all — a pure
+// routing/relay worker that never stores or replicates data itself.
+type MemLimit *uint64
+
+// Bytes returns a MemLimit of exactly n bytes. Bytes(0) means genuinely
+// zero — no keyspace ownership — not "use the default."
+// Combine with KB/MB/GB, e.g. Bytes(512 * MB).
+func Bytes(n uint64) MemLimit { return &n }
+
 func defaultConfig() Config {
 	return Config{
 		Mode:                 ModeStandalone,
@@ -111,7 +131,7 @@ func defaultConfig() Config {
 		BindPort:             7946,
 		RoutingTimeout:       1 * time.Second,
 		ReplicationFactor:    1,
-		MemLimit:             sys.TotalMemory(),
+		MemLimit:             Bytes(sys.TotalMemory()),
 		GossipInterval:       5 * time.Second,
 		GossipFanout:         3,
 		GossipTimeout:        300 * time.Millisecond,
@@ -161,7 +181,7 @@ func (c *Config) applyDefaults() {
 	if c.ReplicationBatchSize == 0 {
 		c.ReplicationBatchSize = d.ReplicationBatchSize
 	}
-	if c.MemLimit == 0 {
+	if c.MemLimit == nil {
 		c.MemLimit = d.MemLimit
 	}
 	if c.CleanupInterval == 0 {

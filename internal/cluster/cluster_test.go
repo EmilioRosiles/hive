@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 // No TCP server, gossip loop, or janitor is started.
 func newTestCluster(nodeID string) *Cluster {
 	r := ring.New(1)
-	r.Add(nodeID, defaultVNodes)
+	r.Add(nodeID, 100) // arbitrary nonzero vnode count for this no-network fixture
 	m := &Cluster{
 		cfg: Config{
 			NodeID:               nodeID,
@@ -25,7 +26,7 @@ func newTestCluster(nodeID string) *Cluster {
 			ReplicationBatchSize: 16,
 		},
 		ring:        r,
-		store:       store.NewDataStore(0),
+		store:       store.NewDataStore(math.MaxInt64), // capacity is enforced literally; this fixture doesn't want a cap
 		peers:       make(map[string]*PeerInfo),
 		clients:     make(map[string]*transport.Client),
 		replicators: make(map[string]*replicator),
@@ -44,6 +45,7 @@ func ps(nodeID, addr string, status NodeStatus, incarnation uint64) transport.Pe
 		Status:            uint8(status),
 		Incarnation:       incarnation,
 		ReplicationFactor: 1,
+		MemLimit:          256 << 20, // realistic nonzero vnode count; 0 now means "owns nothing"
 	}
 }
 

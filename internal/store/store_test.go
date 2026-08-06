@@ -3,11 +3,17 @@ package store
 import (
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 )
 
 // -- helpers --
+
+// unlimited is passed to NewDataStore in tests that don't care about
+// capacity enforcement — capacity is enforced literally (0 means zero,
+// not unlimited), so a real, effectively-uncapped value is needed instead.
+const unlimited = math.MaxInt64
 
 func val(s string) *ValueStructure { return NewValueStructure([]byte(s)) }
 
@@ -38,7 +44,7 @@ func entrySize(key, v string) int64 {
 // -- Set / Get --
 
 func TestSetAndGet(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("hello"))
 
 	e, ok := ds.Get("k")
@@ -51,14 +57,14 @@ func TestSetAndGet(t *testing.T) {
 }
 
 func TestGetMissingKey(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	if _, ok := ds.Get("missing"); ok {
 		t.Error("Get: expected false for missing key")
 	}
 }
 
 func TestGetExpiredKey(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	e := NewValueStructureWithTTL([]byte("bye"), 10*time.Millisecond)
 	mustSet(t, ds, "k", e)
 	time.Sleep(20 * time.Millisecond)
@@ -68,7 +74,7 @@ func TestGetExpiredKey(t *testing.T) {
 }
 
 func TestSetOverwrite(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("first"))
 	mustSet(t, ds, "k", val("second"))
 
@@ -87,7 +93,7 @@ func TestSetOverwrite(t *testing.T) {
 // -- Del --
 
 func TestDel(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("v"))
 	ds.Del("k")
 	if _, ok := ds.Get("k"); ok {
@@ -96,7 +102,7 @@ func TestDel(t *testing.T) {
 }
 
 func TestDelMissingKeyIsNoOp(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	before := ds.used.Load()
 	ds.Del("nonexistent")
 	if ds.used.Load() != before {
@@ -105,7 +111,7 @@ func TestDelMissingKeyIsNoOp(t *testing.T) {
 }
 
 func TestDelDecrementsUsed(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("v"))
 	before := ds.used.Load()
 	ds.Del("k")
@@ -120,7 +126,7 @@ func TestDelDecrementsUsed(t *testing.T) {
 // -- Expire --
 
 func TestExpireTTL(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("v"))
 	ds.Expire("k", 10*time.Millisecond)
 	time.Sleep(20 * time.Millisecond)
@@ -130,14 +136,14 @@ func TestExpireTTL(t *testing.T) {
 }
 
 func TestExpireMissingKey(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	if ds.Expire("missing", time.Second) {
 		t.Error("Expire: should return false for missing key")
 	}
 }
 
 func TestExpireClearTTL(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	e := NewValueStructureWithTTL([]byte("v"), 20*time.Millisecond)
 	mustSet(t, ds, "k", e)
 	ds.Expire("k", 0) // clear TTL
@@ -150,7 +156,7 @@ func TestExpireClearTTL(t *testing.T) {
 // -- Read --
 
 func TestReadCallsFnForExistingKey(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("v"))
 	called := false
 	ds.Read("k", func(e DataStructure) { called = true })
@@ -160,12 +166,12 @@ func TestReadCallsFnForExistingKey(t *testing.T) {
 }
 
 func TestReadSkipsMissingKey(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	ds.Read("missing", func(DataStructure) { t.Error("Read: fn should not be called for missing key") })
 }
 
 func TestReadSkipsExpiredKey(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	e := NewValueStructureWithTTL([]byte("v"), 10*time.Millisecond)
 	mustSet(t, ds, "k", e)
 	time.Sleep(20 * time.Millisecond)
@@ -175,7 +181,7 @@ func TestReadSkipsExpiredKey(t *testing.T) {
 // -- Apply --
 
 func TestApplyCreatesEntry(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	err := ds.Apply("k", func(e DataStructure) (DataStructure, error) {
 		return val("created"), nil
 	})
@@ -188,7 +194,7 @@ func TestApplyCreatesEntry(t *testing.T) {
 }
 
 func TestApplyUpdatesEntry(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("old"))
 	ds.Apply("k", func(e DataStructure) (DataStructure, error) {
 		return val("new"), nil
@@ -200,7 +206,7 @@ func TestApplyUpdatesEntry(t *testing.T) {
 }
 
 func TestApplyNilDeletesEntry(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("v"))
 	usedBefore := ds.used.Load()
 	ds.Apply("k", func(DataStructure) (DataStructure, error) { return nil, nil })
@@ -213,7 +219,7 @@ func TestApplyNilDeletesEntry(t *testing.T) {
 }
 
 func TestApplyPropagatesFnError(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	sentinel := errors.New("fn error")
 	err := ds.Apply("k", func(DataStructure) (DataStructure, error) { return nil, sentinel })
 	if !errors.Is(err, sentinel) {
@@ -224,7 +230,7 @@ func TestApplyPropagatesFnError(t *testing.T) {
 // -- Scan --
 
 func TestScanIteratesAllLiveEntries(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	for i := range 10 {
 		mustSet(t, ds, fmt.Sprintf("k%d", i), val("v"))
 	}
@@ -236,7 +242,7 @@ func TestScanIteratesAllLiveEntries(t *testing.T) {
 }
 
 func TestScanSkipsExpiredEntries(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "live", val("v"))
 	e := NewValueStructureWithTTL([]byte("v"), 10*time.Millisecond)
 	mustSet(t, ds, "dead", e)
@@ -298,7 +304,7 @@ func TestCapacityAllowsShrinkingOverwrite(t *testing.T) {
 }
 
 func TestCapacityUnlimitedNeverRejects(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	for i := range 10000 {
 		if err := ds.Set(fmt.Sprintf("k%d", i), val("v")); err != nil {
 			t.Fatalf("unlimited store rejected write at i=%d: %v", i, err)
@@ -309,7 +315,7 @@ func TestCapacityUnlimitedNeverRejects(t *testing.T) {
 // -- used accounting --
 
 func TestUsedAccountingFreshInsert(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	key, v := "k", "hello"
 	mustSet(t, ds, key, val(v))
 	want := entrySize(key, v)
@@ -319,7 +325,7 @@ func TestUsedAccountingFreshInsert(t *testing.T) {
 }
 
 func TestUsedAccountingOverwrite(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("short"))
 	mustSet(t, ds, "k", val("longer-value"))
 	want := entrySize("k", "longer-value")
@@ -329,7 +335,7 @@ func TestUsedAccountingOverwrite(t *testing.T) {
 }
 
 func TestUsedAccountingRepeatedOverwrite(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	for range 1000 {
 		mustSet(t, ds, "k", val("v"))
 	}
@@ -340,7 +346,7 @@ func TestUsedAccountingRepeatedOverwrite(t *testing.T) {
 }
 
 func TestUsedAccountingDel(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("v"))
 	ds.Del("k")
 	if got := ds.used.Load(); got != 0 {
@@ -351,7 +357,7 @@ func TestUsedAccountingDel(t *testing.T) {
 // -- DeleteExpired --
 
 func TestDeleteExpiredRemovesExpiredEntries(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 
 	e := NewValueStructureWithTTL([]byte("v"), 10*time.Millisecond)
 	mustSet(t, ds, "k", e)
@@ -369,7 +375,7 @@ func TestDeleteExpiredRemovesExpiredEntries(t *testing.T) {
 }
 
 func TestDeleteExpiredRemovesEmptySet(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 
 	err := ds.Apply("s", func(_ DataStructure) (DataStructure, error) {
 		ss := NewSetStructure()
@@ -391,7 +397,7 @@ func TestDeleteExpiredRemovesEmptySet(t *testing.T) {
 // -- ApplyIfNewer --
 
 func TestApplyIfNewer_NoExisting_Stores(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	v := val("hello")
 	v.setMTime(uint32(time.Now().Unix()))
 
@@ -404,7 +410,7 @@ func TestApplyIfNewer_NoExisting_Stores(t *testing.T) {
 }
 
 func TestApplyIfNewer_NewerWins(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("old"))
 
 	newer := val("new")
@@ -420,7 +426,7 @@ func TestApplyIfNewer_NewerWins(t *testing.T) {
 }
 
 func TestApplyIfNewer_OlderLoses(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("current"))
 
 	stale := val("stale")
@@ -436,7 +442,7 @@ func TestApplyIfNewer_OlderLoses(t *testing.T) {
 }
 
 func TestApplyIfNewer_SameTimestamp_KeepsExisting(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("first"))
 
 	existing, _ := ds.Get("k")
@@ -453,7 +459,7 @@ func TestApplyIfNewer_SameTimestamp_KeepsExisting(t *testing.T) {
 }
 
 func TestApplyIfNewer_UsedAccountingNewKey(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	v := val("hello")
 	v.setMTime(uint32(time.Now().Unix()))
 
@@ -465,7 +471,7 @@ func TestApplyIfNewer_UsedAccountingNewKey(t *testing.T) {
 }
 
 func TestApplyIfNewer_UsedAccountingReplace(t *testing.T) {
-	ds := NewDataStore(0)
+	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("short"))
 
 	longer := val("much-longer")
