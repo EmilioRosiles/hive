@@ -136,12 +136,12 @@ func benchSetSize(b *testing.B, size int) {
 
 // -- helpers --
 
-func benchStandalone(b *testing.B) *hive.Cache {
+func benchStandalone(b *testing.B) *hive.Cluster {
 	b.Helper()
 	node, err := hive.NewNode(hive.Config{})
 	if err != nil {
 		b.Fatalf("benchStandalone: %v", err)
 	}
 	b.Cleanup(func() { node.Shutdown() })
-	return node.Cache()
+	return node.Cluster()
 }

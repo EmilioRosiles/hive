@@ -54,6 +54,7 @@ type PeerInfo struct {
 	Incarnation       uint64
 	ReplicationFactor int
 	MemLimit          uint64
+	MemUsed           uint64
 }
 
 // Cluster owns the cluster state for this node.
@@ -135,6 +136,16 @@ func (m *Cluster) Shutdown() error {
 	return err
 }
 
+// Used returns this node's current estimated local byte usage.
+func (m *Cluster) Used() int64 {
+	return m.store.Used()
+}
+
+// KeyCount returns the number of live keys held locally by this node.
+func (m *Cluster) KeyCount() int {
+	return m.store.Len()
+}
+
 // Peers returns a snapshot of all known peers.
 func (m *Cluster) Peers() []PeerInfo {
 	m.mu.RLock()
@@ -160,6 +171,7 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	defer m.mu.Unlock()
 
 	if p, ok := m.peers[ps.NodeID]; ok {
+		p.MemUsed = ps.MemUsed
 		if p.Status != NodeAlive {
 			p.Status = NodeAlive
 			p.Incarnation = ps.Incarnation
@@ -178,6 +190,7 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 		Incarnation:       ps.Incarnation,
 		ReplicationFactor: ps.ReplicationFactor,
 		MemLimit:          ps.MemLimit,
+		MemUsed:           ps.MemUsed,
 	}
 	m.ring.Add(ps.NodeID, vNodeCount)
 	m.clients[ps.NodeID] = m.newClient(ps.Addr)

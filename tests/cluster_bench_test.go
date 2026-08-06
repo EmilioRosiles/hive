@@ -10,38 +10,38 @@ import (
 )
 
 // benchClusterNodes starts an n-node cluster with the given replication
-// factor and waits for full membership before returning one Cache per node.
+// factor and waits for full membership before returning one Cluster per node.
 //
 // Run with a fixed iteration count (-benchtime=Nx) rather than the default
 // auto-ranging duration: Go's benchmark runner otherwise re-invokes this
 // function (and re-forms the whole cluster) multiple times while calibrating
 // b.N, which is both slow and adds setup noise to the measurement.
-func benchClusterNodes(b *testing.B, n, rf int) []*hive.Cache {
+func benchClusterNodes(b *testing.B, n, rf int) []*hive.Cluster {
 	b.Helper()
 	nodes := make([]*hive.Node, n)
-	caches := make([]*hive.Cache, n)
+	clusters := make([]*hive.Cluster, n)
 	var seed string
 	for i := range n {
 		var seeds []string
 		if seed != "" {
 			seeds = []string{seed}
 		}
-		node, cache := clusterNode(b, seeds, rf)
+		node, cluster := clusterNode(b, seeds, rf)
 		nodes[i] = node
-		caches[i] = cache
+		clusters[i] = cluster
 		if i == 0 {
 			seed = addr(node)
 		}
 	}
 	waitFor(b, 5*time.Second, "cluster formed", func() bool {
 		for _, node := range nodes {
-			if node.Status().Size != n {
+			if node.Cluster().AliveCount() != n {
 				return false
 			}
 		}
 		return true
 	})
-	return caches
+	return clusters
 }
 
 // benchKeySpace bounds the number of distinct keys written per run, so the

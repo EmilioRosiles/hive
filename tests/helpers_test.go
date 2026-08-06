@@ -2,7 +2,6 @@ package tests
 
 import (
 	"crypto/tls"
-	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -24,20 +23,20 @@ type Stream struct {
 
 // -- node helpers --
 
-// standalone returns a cache backed by a single local node with no networking.
-func standalone(t testing.TB) *hive.Cache {
+// standalone returns a cluster handle backed by a single local node with no networking.
+func standalone(t testing.TB) *hive.Cluster {
 	t.Helper()
 	node, err := hive.NewNode(hive.Config{})
 	if err != nil {
 		t.Fatalf("standalone: %v", err)
 	}
 	t.Cleanup(func() { node.Shutdown() })
-	return node.Cache()
+	return node.Cluster()
 }
 
-// clusterNode starts a cluster-mode node and returns its node and cache.
+// clusterNode starts a cluster-mode node and returns its node and cluster handle.
 // The node is shut down automatically when the test ends.
-func clusterNode(t testing.TB, seeds []string, rf int) (*hive.Node, *hive.Cache) {
+func clusterNode(t testing.TB, seeds []string, rf int) (*hive.Node, *hive.Cluster) {
 	t.Helper()
 	node, err := hive.NewNode(hive.Config{
 		Mode:              hive.ModeCluster,
@@ -53,12 +52,12 @@ func clusterNode(t testing.TB, seeds []string, rf int) (*hive.Node, *hive.Cache)
 		t.Fatalf("clusterNode: %v", err)
 	}
 	t.Cleanup(func() { node.Shutdown() })
-	return node, node.Cache()
+	return node, node.Cluster()
 }
 
 // clusterNodeTLS mirrors clusterNode but binds cluster-mode peer connections
 // over TLS using tlsConfig.
-func clusterNodeTLS(t testing.TB, seeds []string, rf int, tlsConfig *tls.Config) (*hive.Node, *hive.Cache) {
+func clusterNodeTLS(t testing.TB, seeds []string, rf int, tlsConfig *tls.Config) (*hive.Node, *hive.Cluster) {
 	t.Helper()
 	node, err := hive.NewNode(hive.Config{
 		Mode:              hive.ModeCluster,
@@ -75,12 +74,12 @@ func clusterNodeTLS(t testing.TB, seeds []string, rf int, tlsConfig *tls.Config)
 		t.Fatalf("clusterNodeTLS: %v", err)
 	}
 	t.Cleanup(func() { node.Shutdown() })
-	return node, node.Cache()
+	return node, node.Cluster()
 }
 
 // clusterNodeWithMemLimit mirrors clusterNode but with an explicit MemLimit —
 // e.g. hive.Bytes(0) for a pure routing/relay worker that owns no keyspace.
-func clusterNodeWithMemLimit(t testing.TB, seeds []string, rf int, memLimit hive.MemLimit) (*hive.Node, *hive.Cache) {
+func clusterNodeWithMemLimit(t testing.TB, seeds []string, rf int, memLimit hive.MemLimit) (*hive.Node, *hive.Cluster) {
 	t.Helper()
 	node, err := hive.NewNode(hive.Config{
 		Mode:              hive.ModeCluster,
@@ -97,13 +96,12 @@ func clusterNodeWithMemLimit(t testing.TB, seeds []string, rf int, memLimit hive
 		t.Fatalf("clusterNodeWithMemLimit: %v", err)
 	}
 	t.Cleanup(func() { node.Shutdown() })
-	return node, node.Cache()
+	return node, node.Cluster()
 }
 
 // addr returns the bind address of a cluster node.
 func addr(n *hive.Node) string {
-	s := n.Status()
-	return fmt.Sprintf("127.0.0.1:%d", s.BindPort)
+	return n.Addr()
 }
 
 // freePort returns an available TCP port on localhost.

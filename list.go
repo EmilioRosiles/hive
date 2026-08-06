@@ -6,21 +6,21 @@ import (
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
-// ListStore[T] is a distributed ordered list backed by a Cache. Each element is
+// ListStore[T] is a distributed ordered list backed by a Cluster. Each element is
 // msgpack-encoded. Keys are namespaced as {name}:l:{key}.
 //
-//	queue := hive.NewListStore[Task](cache, "work_queue")
+//	queue := hive.NewListStore[Task](cluster, "work_queue")
 //	queue.RPush("jobs", task)
 //	job, err := queue.LPop("jobs")
 type ListStore[T any] struct {
-	cache  *Cache
-	prefix string
+	cluster *Cluster
+	prefix  string
 }
 
-// NewListStore creates a list store backed by cache.
+// NewListStore creates a list store backed by cluster.
 // name is used as the namespace — use a distinct name per list.
-func NewListStore[T any](cache *Cache, name string) *ListStore[T] {
-	return &ListStore[T]{cache: cache, prefix: name + ":l:"}
+func NewListStore[T any](cluster *Cluster, name string) *ListStore[T] {
+	return &ListStore[T]{cluster: cluster, prefix: name + ":l:"}
 }
 
 // LPush prepends value to the head of the list at key.
@@ -29,7 +29,7 @@ func (l *ListStore[T]) LPush(key string, value T) error {
 	if err != nil {
 		return err
 	}
-	_, err = l.cache.exec(transport.OpLPush, l.prefix+key, data)
+	_, err = l.cluster.exec(transport.OpLPush, l.prefix+key, data)
 	return err
 }
 
@@ -39,7 +39,7 @@ func (l *ListStore[T]) RPush(key string, value T) error {
 	if err != nil {
 		return err
 	}
-	_, err = l.cache.exec(transport.OpRPush, l.prefix+key, data)
+	_, err = l.cluster.exec(transport.OpRPush, l.prefix+key, data)
 	return err
 }
 
@@ -55,7 +55,7 @@ func (l *ListStore[T]) RPop(key string) (T, error) {
 
 func (l *ListStore[T]) pop(op transport.Op, key string) (T, error) {
 	var zero T
-	results, err := l.cache.exec(op, l.prefix+key)
+	results, err := l.cluster.exec(op, l.prefix+key)
 	if err != nil {
 		return zero, err
 	}
@@ -64,7 +64,7 @@ func (l *ListStore[T]) pop(op transport.Op, key string) (T, error) {
 
 // LLen returns the number of elements in the list at key.
 func (l *ListStore[T]) LLen(key string) (int, error) {
-	results, err := l.cache.exec(transport.OpLLen, l.prefix+key)
+	results, err := l.cluster.exec(transport.OpLLen, l.prefix+key)
 	if err != nil {
 		return 0, err
 	}
@@ -75,7 +75,7 @@ func (l *ListStore[T]) LLen(key string) (int, error) {
 // Returns ErrNotFound if the index is out of bounds.
 func (l *ListStore[T]) LIndex(key string, index int) (T, error) {
 	var zero T
-	results, err := l.cache.exec(transport.OpLIndex, l.prefix+key, encodeInt64(int64(index)))
+	results, err := l.cluster.exec(transport.OpLIndex, l.prefix+key, encodeInt64(int64(index)))
 	if err != nil {
 		return zero, err
 	}
@@ -85,7 +85,7 @@ func (l *ListStore[T]) LIndex(key string, index int) (T, error) {
 // LRange returns elements from start to stop inclusive. Negative indices
 // are supported. Out-of-range bounds are clipped silently.
 func (l *ListStore[T]) LRange(key string, start, stop int) ([]T, error) {
-	results, err := l.cache.exec(transport.OpLRange, l.prefix+key,
+	results, err := l.cluster.exec(transport.OpLRange, l.prefix+key,
 		encodeInt64(int64(start)), encodeInt64(int64(stop)))
 	if err != nil {
 		return nil, err
@@ -107,18 +107,18 @@ func (l *ListStore[T]) LSet(key string, index int, value T) error {
 	if err != nil {
 		return err
 	}
-	_, err = l.cache.exec(transport.OpLSet, l.prefix+key, encodeInt64(int64(index)), data)
+	_, err = l.cluster.exec(transport.OpLSet, l.prefix+key, encodeInt64(int64(index)), data)
 	return err
 }
 
 // Del removes the entire list at key.
 func (l *ListStore[T]) Del(key string) error {
-	_, err := l.cache.exec(transport.OpDel, l.prefix+key)
+	_, err := l.cluster.exec(transport.OpDel, l.prefix+key)
 	return err
 }
 
 // Expire sets a key-level TTL. The entire list is deleted after ttl elapses.
 func (l *ListStore[T]) Expire(key string, ttl time.Duration) error {
-	_, err := l.cache.exec(transport.OpExpire, l.prefix+key, encodeTTL(ttl))
+	_, err := l.cluster.exec(transport.OpExpire, l.prefix+key, encodeTTL(ttl))
 	return err
 }

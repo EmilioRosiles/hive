@@ -7,20 +7,20 @@ import (
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
-// ValueStore is a typed key/value store backed by a Cache. Keys are namespaced
+// ValueStore is a typed key/value store backed by a Cluster. Keys are namespaced
 // as {name}:v:{key} to prevent collisions with other stores on the same node.
 //
-//	sessions := hive.NewValueStore[Session](cache, "sessions")
-//	users    := hive.NewValueStore[User](cache, "users")
+//	sessions := hive.NewValueStore[Session](cluster, "sessions")
+//	users    := hive.NewValueStore[User](cluster, "users")
 type ValueStore[T any] struct {
-	cache  *Cache
-	prefix string
+	cluster *Cluster
+	prefix  string
 }
 
-// NewValueStore creates a typed value store backed by cache.
+// NewValueStore creates a typed value store backed by cluster.
 // name is used as the namespace — use a distinct name per value type.
-func NewValueStore[T any](cache *Cache, name string) *ValueStore[T] {
-	return &ValueStore[T]{cache: cache, prefix: name + ":v:"}
+func NewValueStore[T any](cluster *Cluster, name string) *ValueStore[T] {
+	return &ValueStore[T]{cluster: cluster, prefix: name + ":v:"}
 }
 
 // Set encodes value using msgpack and stores it under key.
@@ -29,7 +29,7 @@ func (s *ValueStore[T]) Set(key string, value T) error {
 	if err != nil {
 		return fmt.Errorf("hive: %s.Set %q: %w", s.prefix, key, err)
 	}
-	_, err = s.cache.exec(transport.OpValueSet, s.prefix+key, data)
+	_, err = s.cluster.exec(transport.OpValueSet, s.prefix+key, data)
 	return err
 }
 
@@ -37,7 +37,7 @@ func (s *ValueStore[T]) Set(key string, value T) error {
 // Returns an error if the key does not exist or has expired.
 func (s *ValueStore[T]) Get(key string) (T, error) {
 	var zero T
-	results, err := s.cache.exec(transport.OpValueGet, s.prefix+key)
+	results, err := s.cluster.exec(transport.OpValueGet, s.prefix+key)
 	if err != nil {
 		return zero, fmt.Errorf("hive: %s.Get %q: %w", s.prefix, key, err)
 	}
@@ -50,12 +50,12 @@ func (s *ValueStore[T]) Get(key string) (T, error) {
 
 // Del removes key from the store.
 func (s *ValueStore[T]) Del(key string) error {
-	_, err := s.cache.exec(transport.OpDel, s.prefix+key)
+	_, err := s.cluster.exec(transport.OpDel, s.prefix+key)
 	return err
 }
 
 // Expire sets a TTL on key. The entry is deleted automatically after ttl elapses.
 func (s *ValueStore[T]) Expire(key string, ttl time.Duration) error {
-	_, err := s.cache.exec(transport.OpExpire, s.prefix+key, encodeTTL(ttl))
+	_, err := s.cluster.exec(transport.OpExpire, s.prefix+key, encodeTTL(ttl))
 	return err
 }

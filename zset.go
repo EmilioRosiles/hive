@@ -12,40 +12,40 @@ type ZSetEntry struct {
 	Score  float64
 }
 
-// ZSetStore is a distributed sorted set backed by a Cache. Members are unique
+// ZSetStore is a distributed sorted set backed by a Cluster. Members are unique
 // strings each associated with a float64 score. The set is always kept in
 // ascending score order (ties broken lexicographically). Keys are namespaced
 // as {name}:z:{key}.
 //
-//	scores := hive.NewZSetStore(cache, "leaderboard")
+//	scores := hive.NewZSetStore(cluster, "leaderboard")
 //	scores.ZAdd("game:1", 9500.0, "alice")
 //	top, _ := scores.ZRange("game:1", -3, -1)
 type ZSetStore struct {
-	cache  *Cache
-	prefix string
+	cluster *Cluster
+	prefix  string
 }
 
-// NewZSetStore creates a sorted-set store backed by cache.
-func NewZSetStore(cache *Cache, name string) *ZSetStore {
-	return &ZSetStore{cache: cache, prefix: name + ":z:"}
+// NewZSetStore creates a sorted-set store backed by cluster.
+func NewZSetStore(cluster *Cluster, name string) *ZSetStore {
+	return &ZSetStore{cluster: cluster, prefix: name + ":z:"}
 }
 
 // ZAdd inserts or updates member with score.
 func (z *ZSetStore) ZAdd(key string, score float64, member string) error {
-	_, err := z.cache.exec(transport.OpZAdd, z.prefix+key,
+	_, err := z.cluster.exec(transport.OpZAdd, z.prefix+key,
 		encodeFloat64(score), []byte(member))
 	return err
 }
 
 // ZRem removes member. No-op if member does not exist.
 func (z *ZSetStore) ZRem(key, member string) error {
-	_, err := z.cache.exec(transport.OpZRem, z.prefix+key, []byte(member))
+	_, err := z.cluster.exec(transport.OpZRem, z.prefix+key, []byte(member))
 	return err
 }
 
 // ZScore returns the score for member. Returns ErrNotFound if member does not exist.
 func (z *ZSetStore) ZScore(key, member string) (float64, error) {
-	results, err := z.cache.exec(transport.OpZScore, z.prefix+key, []byte(member))
+	results, err := z.cluster.exec(transport.OpZScore, z.prefix+key, []byte(member))
 	if err != nil {
 		return 0, err
 	}
@@ -55,7 +55,7 @@ func (z *ZSetStore) ZScore(key, member string) (float64, error) {
 // ZRank returns the 0-based rank of member in ascending score order (lowest = 0).
 // Returns ErrNotFound if member does not exist.
 func (z *ZSetStore) ZRank(key, member string) (int, error) {
-	results, err := z.cache.exec(transport.OpZRank, z.prefix+key, []byte(member))
+	results, err := z.cluster.exec(transport.OpZRank, z.prefix+key, []byte(member))
 	if err != nil {
 		return 0, err
 	}
@@ -65,7 +65,7 @@ func (z *ZSetStore) ZRank(key, member string) (int, error) {
 // ZRevRank returns the 0-based rank in descending score order (highest = 0).
 // Returns ErrNotFound if member does not exist.
 func (z *ZSetStore) ZRevRank(key, member string) (int, error) {
-	results, err := z.cache.exec(transport.OpZRevRank, z.prefix+key, []byte(member))
+	results, err := z.cluster.exec(transport.OpZRevRank, z.prefix+key, []byte(member))
 	if err != nil {
 		return 0, err
 	}
@@ -74,7 +74,7 @@ func (z *ZSetStore) ZRevRank(key, member string) (int, error) {
 
 // ZCard returns the number of members.
 func (z *ZSetStore) ZCard(key string) (int, error) {
-	results, err := z.cache.exec(transport.OpZCard, z.prefix+key)
+	results, err := z.cluster.exec(transport.OpZCard, z.prefix+key)
 	if err != nil {
 		return 0, err
 	}
@@ -85,7 +85,7 @@ func (z *ZSetStore) ZCard(key string) (int, error) {
 // Negative indices count from the end (highest rank). Out-of-range bounds are
 // clipped silently.
 func (z *ZSetStore) ZRange(key string, start, stop int) ([]ZSetEntry, error) {
-	results, err := z.cache.exec(transport.OpZRange, z.prefix+key,
+	results, err := z.cluster.exec(transport.OpZRange, z.prefix+key,
 		encodeInt64(int64(start)), encodeInt64(int64(stop)))
 	if err != nil {
 		return nil, err
@@ -95,7 +95,7 @@ func (z *ZSetStore) ZRange(key string, start, stop int) ([]ZSetEntry, error) {
 
 // ZRangeByScore returns all members with min <= score <= max in ascending order.
 func (z *ZSetStore) ZRangeByScore(key string, min, max float64) ([]ZSetEntry, error) {
-	results, err := z.cache.exec(transport.OpZRangeByScore, z.prefix+key,
+	results, err := z.cluster.exec(transport.OpZRangeByScore, z.prefix+key,
 		encodeFloat64(min), encodeFloat64(max))
 	if err != nil {
 		return nil, err
@@ -105,13 +105,13 @@ func (z *ZSetStore) ZRangeByScore(key string, min, max float64) ([]ZSetEntry, er
 
 // Del removes the entire sorted set at key.
 func (z *ZSetStore) Del(key string) error {
-	_, err := z.cache.exec(transport.OpDel, z.prefix+key)
+	_, err := z.cluster.exec(transport.OpDel, z.prefix+key)
 	return err
 }
 
 // Expire sets a key-level TTL. The entire sorted set is deleted after ttl elapses.
 func (z *ZSetStore) Expire(key string, ttl time.Duration) error {
-	_, err := z.cache.exec(transport.OpExpire, z.prefix+key, encodeTTL(ttl))
+	_, err := z.cluster.exec(transport.OpExpire, z.prefix+key, encodeTTL(ttl))
 	return err
 }
 

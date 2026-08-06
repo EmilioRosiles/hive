@@ -119,6 +119,23 @@ func NewDataStore(memLimit uint64) *DataStore {
 	return ds
 }
 
+// Used returns the current estimated byte usage across all shards.
+func (ds *DataStore) Used() int64 {
+	return ds.used.Load()
+}
+
+// Len returns the number of live entries across all shards. Entries that
+// have expired but not yet been swept by the janitor are counted as live.
+func (ds *DataStore) Len() int {
+	n := 0
+	for _, s := range ds.shards {
+		s.mu.RLock()
+		n += len(s.data)
+		s.mu.RUnlock()
+	}
+	return n
+}
+
 // DecodeEntry deserializes an entry of the given Kind using the registered decoder.
 func (ds *DataStore) DecodeEntry(kind Kind, data []byte) (DataStructure, error) {
 	fn, ok := ds.decoders[kind]

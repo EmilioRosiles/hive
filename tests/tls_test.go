@@ -24,7 +24,7 @@ func TestCluster_TLS_FormsAndReplicates(t *testing.T) {
 	n3, c3 := clusterNodeTLS(t, []string{addr(n1)}, 2, tlsConfig)
 
 	waitFor(t, 2*time.Second, "TLS cluster formed", func() bool {
-		return n1.Status().Size == 3 && n2.Status().Size == 3 && n3.Status().Size == 3
+		return n1.Cluster().AliveCount() == 3 && n2.Cluster().AliveCount() == 3 && n3.Cluster().AliveCount() == 3
 	})
 
 	store1 := hive.NewValueStore[Session](c1, "sessions")

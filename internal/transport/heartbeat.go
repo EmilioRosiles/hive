@@ -10,6 +10,7 @@ type PeerState struct {
 	Incarnation       uint64
 	ReplicationFactor int
 	MemLimit          uint64
+	MemUsed           uint64
 }
 
 type HeartbeatRequest struct {

@@ -14,9 +14,9 @@ func TestCluster_Formation(t *testing.T) {
 	n3, _ := clusterNode(t, []string{addr(n1)}, 1)
 
 	waitFor(t, 1*time.Second, "all nodes see 2 peers", func() bool {
-		return n1.Status().Size == 3 &&
-			n2.Status().Size == 3 &&
-			n3.Status().Size == 3
+		return n1.Cluster().AliveCount() == 3 &&
+			n2.Cluster().AliveCount() == 3 &&
+			n3.Cluster().AliveCount() == 3
 	})
 }
 
@@ -26,7 +26,7 @@ func TestCluster_ReadFromAnyNode(t *testing.T) {
 	_, c3 := clusterNode(t, []string{addr(n1)}, 1)
 
 	waitFor(t, 1*time.Second, "cluster formed", func() bool {
-		return n1.Status().Size == 3 && n2.Status().Size == 3
+		return n1.Cluster().AliveCount() == 3 && n2.Cluster().AliveCount() == 3
 	})
 
 	keys := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
@@ -60,7 +60,7 @@ func TestCluster_SetStoreAcrossNodes(t *testing.T) {
 	n2, c2 := clusterNode(t, []string{addr(n1)}, 1)
 
 	waitFor(t, 1*time.Second, "cluster formed", func() bool {
-		return n1.Status().Size == 2 && n2.Status().Size == 2
+		return n1.Cluster().AliveCount() == 2 && n2.Cluster().AliveCount() == 2
 	})
 
 	online1 := hive.NewSetStore(c1, "online")
@@ -84,7 +84,7 @@ func TestCluster_RebalanceOnJoin(t *testing.T) {
 	n2, _ := clusterNode(t, []string{addr(n1)}, 1)
 
 	waitFor(t, 1*time.Second, "2-node cluster formed", func() bool {
-		return n1.Status().Size == 2 && n2.Status().Size == 2
+		return n1.Cluster().AliveCount() == 2 && n2.Cluster().AliveCount() == 2
 	})
 
 	store := hive.NewValueStore[Session](c1, "sessions")
@@ -97,7 +97,7 @@ func TestCluster_RebalanceOnJoin(t *testing.T) {
 	// Add a third node and wait for rebalance.
 	n3, c3 := clusterNode(t, []string{addr(n1)}, 1)
 	waitFor(t, 1*time.Second, "3-node cluster formed", func() bool {
-		return n1.Status().Size == 3 && n3.Status().Size == 3
+		return n1.Cluster().AliveCount() == 3 && n3.Cluster().AliveCount() == 3
 	})
 	time.Sleep(300 * time.Millisecond) // let rebalance settle
 
@@ -118,7 +118,7 @@ func TestCluster_RebalanceOnJoin_ValueIntegrity(t *testing.T) {
 	n2, c2 := clusterNode(t, []string{addr(n1)}, 1)
 
 	waitFor(t, 1*time.Second, "2-node cluster formed", func() bool {
-		return n1.Status().Size == 2 && n2.Status().Size == 2
+		return n1.Cluster().AliveCount() == 2 && n2.Cluster().AliveCount() == 2
 	})
 
 	const nkeys = 30
@@ -134,7 +134,7 @@ func TestCluster_RebalanceOnJoin_ValueIntegrity(t *testing.T) {
 	// n3 joins; triggers rebalance — some keys migrate to n3.
 	n3, c3 := clusterNode(t, []string{addr(n1)}, 1)
 	waitFor(t, 1*time.Second, "3-node cluster formed", func() bool {
-		return n1.Status().Size == 3 && n3.Status().Size == 3
+		return n1.Cluster().AliveCount() == 3 && n3.Cluster().AliveCount() == 3
 	})
 	time.Sleep(300 * time.Millisecond) // let rebalance settle
 
@@ -165,7 +165,7 @@ func TestCluster_NodeLeave_RF2(t *testing.T) {
 	n3, c3 := clusterNode(t, []string{addr(n1)}, 2)
 
 	waitFor(t, 1*time.Second, "cluster formed", func() bool {
-		return n1.Status().Size == 3 && n2.Status().Size == 3 && n3.Status().Size == 3
+		return n1.Cluster().AliveCount() == 3 && n2.Cluster().AliveCount() == 3 && n3.Cluster().AliveCount() == 3
 	})
 
 	// Write enough keys to ensure every node is primary for at least some.
@@ -185,8 +185,8 @@ func TestCluster_NodeLeave_RF2(t *testing.T) {
 	// n3 leaves gracefully; peers immediately evict it and trigger rebalance.
 	n1.Shutdown()
 	waitFor(t, 2*time.Second, "n1 gone", func() bool {
-		fmt.Printf("%v \n", n2.Status().Size)
-		return n2.Status().Size == 2 && n3.Status().Size == 2
+		fmt.Printf("%v \n", n2.Cluster().AliveCount())
+		return n2.Cluster().AliveCount() == 2 && n3.Cluster().AliveCount() == 2
 	})
 	time.Sleep(200 * time.Millisecond) // let rebalance settle
 
@@ -216,7 +216,7 @@ func TestCluster_SequentialLeaves_DataSurvives(t *testing.T) {
 	n3, _ := clusterNode(t, []string{addr(n1)}, 2)
 
 	waitFor(t, 1*time.Second, "cluster formed", func() bool {
-		return n1.Status().Size == 3 && n2.Status().Size == 3 && n3.Status().Size == 3
+		return n1.Cluster().AliveCount() == 3 && n2.Cluster().AliveCount() == 3 && n3.Cluster().AliveCount() == 3
 	})
 
 	s1 := hive.NewValueStore[Session](c1, "sessions")
@@ -234,14 +234,14 @@ func TestCluster_SequentialLeaves_DataSurvives(t *testing.T) {
 	// First departure: n3 leaves, rebalance redistributes its keys to n1/n2.
 	n3.Shutdown()
 	waitFor(t, 2*time.Second, "n3 gone", func() bool {
-		return n1.Status().Size == 2 && n2.Status().Size == 2
+		return n1.Cluster().AliveCount() == 2 && n2.Cluster().AliveCount() == 2
 	})
 	time.Sleep(200 * time.Millisecond) // let rebalance settle
 
 	// Second departure: n2 leaves, rebalance moves everything to n1.
 	n2.Shutdown()
 	waitFor(t, 2*time.Second, "n2 gone", func() bool {
-		return n1.Status().Size == 1
+		return n1.Cluster().AliveCount() == 1
 	})
 	time.Sleep(200 * time.Millisecond) // let rebalance settle
 
@@ -264,9 +264,9 @@ func TestCluster_ReplicationFactor2(t *testing.T) {
 	n3, c3 := clusterNode(t, []string{addr(n1)}, 2)
 
 	waitFor(t, 1*time.Second, "cluster formed", func() bool {
-		return n1.Status().Size == 3 &&
-			n2.Status().Size == 3 &&
-			n3.Status().Size == 3
+		return n1.Cluster().AliveCount() == 3 &&
+			n2.Cluster().AliveCount() == 3 &&
+			n3.Cluster().AliveCount() == 3
 	})
 
 	store := hive.NewValueStore[Session](c1, "sessions")

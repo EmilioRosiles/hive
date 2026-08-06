@@ -9,8 +9,8 @@ node, _ := hive.NewNode(hive.Config{
 })
 defer node.Shutdown()
 
-cache := node.Cache()
-sessions := hive.NewValueStore[Session](cache, "sessions")
+cluster := node.Cluster()
+sessions := hive.NewValueStore[Session](cluster, "sessions")
 
 sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
 s, err := sessions.Get("user:123")
@@ -44,8 +44,8 @@ if err != nil {
 }
 defer node.Shutdown()
 
-cache := node.Cache()
-counters := hive.NewValueStore[int](cache, "counters")
+cluster := node.Cluster()
+counters := hive.NewValueStore[int](cluster, "counters")
 counters.Set("visits", 42)
 
 v, err := counters.Get("visits")
@@ -96,25 +96,27 @@ node, err := hive.NewNode(hive.Config{
 ### Checking cluster state
 
 ```go
-status := node.Status()
-fmt.Printf("node %s, cluster size %d\n", status.NodeID, status.Size)
-for _, p := range status.Peers {
-    fmt.Printf("  peer %s addr=%s alive=%v\n", p.NodeID, p.Addr, p.Alive)
+cluster := node.Cluster()
+fmt.Printf("node %s, cluster size %d\n", node.ID(), cluster.AliveCount())
+for _, m := range cluster.Members() {
+    fmt.Printf("  member %s addr=%s alive=%v mem=%d/%d\n", m.NodeID, m.Addr, m.Alive, m.MemUsed, m.MemLimit)
 }
 ```
 
+`Node` also exposes local-only facts about this process directly, with no gossip round-trip needed: `node.ID()`, `node.Addr()`, `node.MemUsed()`, `node.MemLimit()`, `node.KeyCount()`, `node.Uptime()`.
+
 ## Stores
 
-Multiple stores can share the same node — they are namespaced views over the same underlying cluster. Obtain a `Cache` handle from the node and pass it to each store constructor.
+Multiple stores can share the same node — they are namespaced views over the same underlying cluster. Obtain a `Cluster` handle from the node and pass it to each store constructor.
 
 ```go
-cache := node.Cache()
+cluster := node.Cluster()
 
-sessions  := hive.NewValueStore[Session](cache, "sessions")
-online    := hive.NewSetStore(cache, "online_users")
-streams   := hive.NewHashStore[Stream](cache, "streams")
-queue     := hive.NewListStore[Task](cache, "work_queue")
-scores    := hive.NewZSetStore(cache, "leaderboard")
+sessions  := hive.NewValueStore[Session](cluster, "sessions")
+online    := hive.NewSetStore(cluster, "online_users")
+streams   := hive.NewHashStore[Stream](cluster, "streams")
+queue     := hive.NewListStore[Task](cluster, "work_queue")
+scores    := hive.NewZSetStore(cluster, "leaderboard")
 ```
 
 Each store type maps to a Redis-style API.
@@ -129,7 +131,7 @@ type Session struct {
     Token  string
 }
 
-sessions := hive.NewValueStore[Session](cache, "sessions")
+sessions := hive.NewValueStore[Session](cluster, "sessions")
 
 // Set stores a value.
 err := sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
@@ -149,7 +151,7 @@ sessions.Expire("user:123", 30*time.Minute)
 A distributed string set. Members can carry independent per-member TTLs, making it useful for tracking presence or short-lived memberships.
 
 ```go
-online := hive.NewSetStore(cache, "online_users")
+online := hive.NewSetStore(cluster, "online_users")
 
 // SAdd adds a member to the set at key.
 online.SAdd("room:1", "user:123")
@@ -184,7 +186,7 @@ type Stream struct {
     BitRate   int
 }
 
-streams := hive.NewHashStore[Stream](cache, "streams")
+streams := hive.NewHashStore[Stream](cluster, "streams")
 
 // HSet stores a value under key/field.
 streams.HSet("user:123", "stream:abc", Stream{StartedAt: time.Now()})
@@ -219,7 +221,7 @@ type Task struct {
     Payload []byte
 }
 
-queue := hive.NewListStore[Task](cache, "work_queue")
+queue := hive.NewListStore[Task](cluster, "work_queue")
 
 // RPush appends to the tail. LPush prepends to the head.
 queue.RPush("jobs", Task{ID: "t1", Payload: data})
@@ -250,7 +252,7 @@ queue.Expire("jobs", 1*time.Hour)
 A distributed sorted set. Each member is a unique string associated with a float64 score. Members are always kept in ascending score order, with ties broken lexicographically.
 
 ```go
-scores := hive.NewZSetStore(cache, "leaderboard")
+scores := hive.NewZSetStore(cluster, "leaderboard")
 
 // ZAdd inserts or updates member with score.
 scores.ZAdd("game:1", 9500.0, "alice")

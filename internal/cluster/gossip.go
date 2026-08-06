@@ -201,6 +201,7 @@ func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 		Incarnation:       m.incarnation.Load(),
 		ReplicationFactor: m.cfg.ReplicationFactor,
 		MemLimit:          m.cfg.MemLimit,
+		MemUsed:           uint64(m.store.Used()),
 	})
 
 	for _, p := range m.peers {
@@ -211,6 +212,7 @@ func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 			Incarnation:       p.Incarnation,
 			ReplicationFactor: p.ReplicationFactor,
 			MemLimit:          p.MemLimit,
+			MemUsed:           p.MemUsed,
 		})
 	}
 
