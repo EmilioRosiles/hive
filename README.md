@@ -319,6 +319,8 @@ hive.Config{
     // Number of nodes that store a copy of each key.
     // Higher values improve fault tolerance but increase write overhead.
     // Must be <= cluster size. Default: 1
+    // At the default of 1, replication is a no-op and each peer's
+    // replication queue is never allocated, saving memory.
     ReplicationFactor int
 
     // How long this node waits before cancelling a routed operation
@@ -341,6 +343,8 @@ hive.Config{
     // the default. Set with hive.Bytes(n), e.g. hive.Bytes(4 * hive.GB), or
     // hive.Bytes(0) for a node that owns no keyspace at all — a pure
     // routing/relay worker that only forwards to the nodes that do.
+    // Such a node also skips rebalancer bookkeeping entirely, since it can
+    // never be a migration source or target.
     MemLimit MemLimit
 
     // How often this node sends heartbeats to peers.
@@ -414,7 +418,7 @@ Single-machine micro-benchmarks, AMD Ryzen 5 5600X (6 cores / 12 threads). A sna
 | GET, 12-way concurrent | ~127 ns/op (~7.87M ops/sec) | ~3.2 μs/op (~313.6K ops/sec) |
 | Idle memory footprint | ~118–120 KB heap | ~450–550 KB heap (3-node formed cluster, per node) |
 
-Idle memory is the incremental heap added to the host process (`runtime.MemStats`, GC-settled), measured after construction. A lone node with no peers yet sits at ~120–123 KB, the same order as standalone. Each known peer's ring slot, connection pool, replicator queue, and gossip state accounts for the rest.
+Idle memory is the incremental heap added to the host process (`runtime.MemStats`, GC-settled), measured after construction. A lone node with no peers yet sits at ~120–123 KB, the same order as standalone. Each known peer's ring slot, connection pool, and gossip state accounts for the rest — plus a replication queue per peer if `ReplicationFactor > 1`, which is otherwise skipped entirely.
 
 ## Data types
 
@@ -437,7 +441,7 @@ Nodes that fail to respond to a heartbeat are marked dead immediately. Their key
 
 The hash ring uses virtual nodes (vnodes) to distribute keyspace. Each node's vnode count is derived from its `MemLimit` relative to the rest of the cluster: a node with twice the memory of its peers owns roughly twice as much keyspace. This means data naturally flows toward nodes with more capacity without any manual weighting.
 
-A node configured with `hive.Bytes(0)` gets exactly zero vnodes — it joins the cluster and participates in gossip like any other node, but never becomes a primary or replica for any key. Reads and writes routed through it are always forwarded to the nodes that actually own the data. This is useful for a pure routing/relay worker, or for setting up benchmarks that pay the same network hop a client of a separate networked cache (e.g. Redis) always pays.
+A node configured with `hive.Bytes(0)` gets exactly zero vnodes — it joins the cluster and participates in gossip like any other node, but never becomes a primary or replica for any key. Reads and writes routed through it are always forwarded to the nodes that actually own the data. Since it can never be a migration source or target, it also skips the rebalancer's bookkeeping (no ring-diffing on topology changes), a small additional memory saving on top of owning no keyspace. This is useful for a pure routing/relay worker, or for setting up benchmarks that pay the same network hop a client of a separate networked cache (e.g. Redis) always pays.
 
 ### Janitor
 

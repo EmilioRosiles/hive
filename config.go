@@ -45,6 +45,8 @@ type Config struct {
 
 	// ReplicationFactor is the number of nodes that should hold a copy
 	// of each key. Must be <= cluster size. Defaults to 1.
+	// At the default of 1, replication is a no-op and each peer's
+	// replication queue is never allocated, saving memory.
 	ReplicationFactor int
 
 	// RoutingTimeout is how long this nodes waits before cancelling a
@@ -61,6 +63,8 @@ type Config struct {
 	// nil (the zero value) means "use total system memory" (default).
 	// Use Bytes(0) for a node that owns no keyspace at all — a pure
 	// routing/relay worker that never stores or replicates data itself.
+	// Such a node also skips rebalancer bookkeeping entirely, since it can
+	// never be a migration source or target.
 	MemLimit MemLimit
 
 	// GossipInterval is how often this node sends heartbeats to peers.
