@@ -15,6 +15,12 @@ import (
 // failure-detection path below needs.
 func newClusteredTestNode(t *testing.T, seeds []string, rf int) *Cluster {
 	t.Helper()
+	return newClusteredTestNodeWithPool(t, seeds, rf, 1)
+}
+
+// newClusteredTestNodeWithPool mirrors newClusteredTestNode with an explicit ConnPoolSize.
+func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int) *Cluster {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
@@ -30,6 +36,7 @@ func newClusteredTestNode(t *testing.T, seeds []string, rf int) *Cluster {
 		ReplicationFactor:    rf,
 		MemLimit:             256 << 20, // realistic capacity/vnode count; 0 now means "owns nothing"
 		RoutingTimeout:       time.Second,
+		ConnPoolSize:         poolSize,
 		GossipInterval:       100 * time.Millisecond,
 		GossipFanout:         3,
 		GossipTimeout:        300 * time.Millisecond,

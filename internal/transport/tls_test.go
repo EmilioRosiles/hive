@@ -39,7 +39,7 @@ func TestServer_TLS_RoundTrip(t *testing.T) {
 	client := NewClient(s.Addr().String(), &tls.Config{
 		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: true, // this test only exercises wiring, not verification policy
-	})
+	}, 1)
 	defer client.Close()
 
 	resp, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("hi")})
@@ -63,7 +63,7 @@ func TestClient_PlaintextDial_RejectedByTLSServer(t *testing.T) {
 	handler, _ := echoHandler(t, nil)
 	s := startTestServerTLS(t, handler, &tls.Config{Certificates: []tls.Certificate{cert}})
 
-	client := NewClient(s.Addr().String(), nil)
+	client := NewClient(s.Addr().String(), nil, 1)
 	defer client.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

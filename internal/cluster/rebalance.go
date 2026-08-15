@@ -43,18 +43,27 @@ func (m *Cluster) handleRebalance(payload []byte) ([]byte, error) {
 
 type rebalancer struct {
 	mu       sync.Mutex
+	mgr      *Cluster
 	timer    *time.Timer
 	debounce time.Duration
 	lastRing *ring.Ring
-	mgr      *Cluster
+	enabled  bool
 }
 
 func newRebalancer(debounce time.Duration, mgr *Cluster) *rebalancer {
-	return &rebalancer{debounce: debounce, mgr: mgr, lastRing: mgr.ring.Copy()}
+	rm := &rebalancer{debounce: debounce, mgr: mgr, enabled: mgr.cfg.MemLimit > 0}
+	if rm.enabled {
+		rm.lastRing = mgr.ring.Copy()
+	}
+	return rm
 }
 
-// schedule debounces rebalance runs so rapid membership changes don't cause cascading migrations.
+// schedule debounces rebalance runs so rapid membership changes don't cause
+// cascading migrations. A no-op rebalancer (see newRebalancer) does nothing.
 func (rm *rebalancer) schedule() {
+	if !rm.enabled {
+		return
+	}
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	if rm.timer != nil {

@@ -51,6 +51,10 @@ type Config struct {
 	// routed op (redirect/replicate).
 	RoutingTimeout time.Duration
 
+	// ConnPoolSize is the number of pooled connections maintained per peer,
+	// round-robin shared across all traffic to that peer. Defaults to 4.
+	ConnPoolSize int
+
 	// MemLimit is the maximum memory this node intends to use.
 	// It is used to compute the node's virtual node count on the hash ring:
 	// nodes with more memory receive proportionally more keyspace.
@@ -130,6 +134,7 @@ func defaultConfig() Config {
 		BindAddr:             "0.0.0.0",
 		BindPort:             7946,
 		RoutingTimeout:       1 * time.Second,
+		ConnPoolSize:         4,
 		ReplicationFactor:    1,
 		MemLimit:             Bytes(sys.TotalMemory()),
 		GossipInterval:       5 * time.Second,
@@ -159,6 +164,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RoutingTimeout == 0 {
 		c.RoutingTimeout = d.RoutingTimeout
+	}
+	if c.ConnPoolSize == 0 {
+		c.ConnPoolSize = d.ConnPoolSize
 	}
 	if c.GossipInterval == 0 {
 		c.GossipInterval = d.GossipInterval

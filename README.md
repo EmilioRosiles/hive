@@ -326,6 +326,16 @@ hive.Config{
     // Default: 1s
     RoutingTimeout time.Duration
 
+    // ConnPoolSize is the number of pooled TCP connections maintained per
+    // peer, round-robin shared across all traffic to that peer (forwarded
+    // reads/writes, replication, gossip, rebalance). Higher values reduce
+    // contention under concurrent load at the cost of more sockets and
+    // goroutines per peer: a node's footprint is roughly
+    // 2 * peers * ConnPoolSize sockets (outbound + inbound). Set to 1 to
+    // recover the old single-connection-per-peer behavior for fd/memory-
+    // constrained deployments. Default: 4
+    ConnPoolSize int
+
     // Maximum memory this node intends to use.
     // Controls two things: capacity enforcement (writes are rejected once the
     // limit is reached) and keyspace allocation (nodes with more memory receive
@@ -397,17 +407,17 @@ This makes Hive well-suited for session caches, rate-limit counters, presence tr
 
 ## Performance
 
-Single-machine micro-benchmarks, AMD Ryzen 5 5600X (6 cores / 12 threads). A snapshot of specific, narrow dimensions, not a general performance claim. Standalone (see [Standalone](#standalone-single-instance)) is a same-process call, no network. Cluster mode is measured across a real network hop: a 3-node cluster (RF=2) where the benchmark driver only ever talks to a node configured with `MemLimit: hive.Bytes(0)` (see [Configuration](#configuration)) — a node that owns no keyspace of its own, so every operation is forwarded to whichever of the other two nodes actually owns the key. Throughput is the reciprocal of latency (`1s / ns per op`); for the concurrent rows that's aggregate ops/sec across all 12 goroutines, not per-goroutine.
+Single-machine micro-benchmarks, AMD Ryzen 5 5600X (6 cores / 12 threads). A snapshot of specific, narrow dimensions, not a general performance claim. Standalone (see [Standalone](#standalone-single-instance)) is a same-process call, no network. Cluster mode is measured across a real network hop: a 3-node cluster (RF=2) where the benchmark driver only ever talks to a node configured with `MemLimit: hive.Bytes(0)` (see [Configuration](#configuration)) — a node that owns no keyspace of its own, so every operation is forwarded to whichever of the other two nodes actually owns the key. Throughput is the reciprocal of latency (`1s / ns per op`); for the concurrent rows that's aggregate ops/sec across all 12 goroutines, not per-goroutine. Cluster mode numbers use the default `ConnPoolSize: 4`, measured in a resource-pinned container (`--cpus=12 --memory=4g`) for a cleaner, repeatable result.
 
 | Metric | Standalone | Cluster mode (cross-node) |
 |---|---|---|
-| SET, single-threaded | ~593 ns/op (~1.69M ops/sec) | ~37 μs/op (~27.0K ops/sec) |
-| GET, single-threaded | ~539 ns/op (~1.86M ops/sec) | ~36 μs/op (~27.8K ops/sec) |
-| SET, 12-way concurrent | ~155 ns/op (~6.45M ops/sec) | ~177 μs/op (~5.65K ops/sec) |
-| GET, 12-way concurrent | ~127 ns/op (~7.87M ops/sec) | ~185 μs/op (~5.41K ops/sec) |
-| Idle memory footprint | ~118–120 KB heap | ~650–750 KB heap (3-node formed cluster, per node) |
+| SET, single-threaded | ~593 ns/op (~1.69M ops/sec) | ~44 μs/op (~23.0K ops/sec) |
+| GET, single-threaded | ~539 ns/op (~1.86M ops/sec) | ~31 μs/op (~32.5K ops/sec) |
+| SET, 12-way concurrent | ~155 ns/op (~6.45M ops/sec) | ~3.8 μs/op (~266.6K ops/sec) |
+| GET, 12-way concurrent | ~127 ns/op (~7.87M ops/sec) | ~3.2 μs/op (~313.6K ops/sec) |
+| Idle memory footprint | ~118–120 KB heap | ~450–550 KB heap (3-node formed cluster, per node) |
 
-Idle memory is the incremental heap added to the host process (`runtime.MemStats`, GC-settled), measured after construction. Clustering machinery itself (TCP listener, gossip loop, janitor) costs about the same as standalone until peers actually join — a lone node with no peers yet sits at ~120–123 KB, same order as standalone. Each known peer then adds roughly 260–310 KB — a ring-vnode slice, a persistent client connection, a replicator queue, and gossip membership state.
+Idle memory is the incremental heap added to the host process (`runtime.MemStats`, GC-settled), measured after construction. A lone node with no peers yet sits at ~120–123 KB, the same order as standalone. Each known peer's ring slot, connection pool, replicator queue, and gossip state accounts for the rest.
 
 ## Data types
 
@@ -454,6 +464,8 @@ Each stored entry carries an `mtime` timestamp (Unix seconds, set at the time of
 **Graceful shutdown** — calling `node.Shutdown()` announces the departure to peers so they can redistribute keys immediately.
 
 **Memory limits** — `MemLimit` affects both write rejection and ring weight. Nodes that exceed their limit return an error on write; they do not evict existing entries to make room. Use TTLs on keys that should not accumulate indefinitely.
+
+**Connection pool size** — each known peer gets `ConnPoolSize` connections (default 4), dialed lazily as traffic flows. Budget roughly `2 × peers × ConnPoolSize` sockets per node; for very large clusters, raise `ulimit -n` or lower `ConnPoolSize`.
 
 ## License
 

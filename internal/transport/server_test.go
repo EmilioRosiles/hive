@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -35,22 +36,37 @@ func startTestServer(t *testing.T, handler Handler) *Server {
 // rawRoundTrip dials addr directly (bypassing Client/mux) and writes+reads a
 // single frame using WriteFrame/ReadFrame. This exercises the server's wire
 // framing in isolation, independent of the client-side mux implementation.
+// Only safe to call from the goroutine running the test itself — it uses
+// t.Fatalf, which must not be called from a spawned goroutine (see
+// rawRoundTripErr for that case).
 func rawRoundTrip(t *testing.T, addr string, req Frame) Frame {
 	t.Helper()
+	resp, err := rawRoundTripErr(addr, req)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return resp
+}
+
+// rawRoundTripErr is rawRoundTrip without the t.Fatalf calls, so it's safe to
+// use from spawned goroutines (Fatalf may only be called from the goroutine
+// running the test — calling it elsewhere just terminates that goroutine
+// silently, without reporting the failure).
+func rawRoundTripErr(addr string, req Frame) (Frame, error) {
 	conn, err := net.DialTimeout("tcp", addr, time.Second)
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		return Frame{}, fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
 
 	if err := WriteFrame(conn, req); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
+		return Frame{}, fmt.Errorf("WriteFrame: %w", err)
 	}
 	resp, err := ReadFrame(conn)
 	if err != nil {
-		t.Fatalf("ReadFrame: %v", err)
+		return Frame{}, fmt.Errorf("ReadFrame: %w", err)
 	}
-	return resp
+	return resp, nil
 }
 
 func TestServer_RoundTrip_MsgForward(t *testing.T) {
@@ -153,7 +169,11 @@ func TestServer_ConcurrentConnections_EachHandledIndependently(t *testing.T) {
 		go func(i int) {
 			req := ForwardRequest{Op: OpValueGet, Key: string(rune('a' + i%26))}
 			payload, _ := req.MarshalBinary()
-			resp := rawRoundTrip(t, s.Addr().String(), Frame{ID: uint32(i), Type: MsgForward, Payload: payload})
+			resp, err := rawRoundTripErr(s.Addr().String(), Frame{ID: uint32(i), Type: MsgForward, Payload: payload})
+			if err != nil {
+				errCh <- err
+				return
+			}
 			if !bytes.Equal(resp.Payload, payload) {
 				errCh <- errMismatch
 				return

@@ -25,17 +25,15 @@ func TestAdd_Idempotent(t *testing.T) {
 	r.Add("node1", 100)
 	v1 := r.GetVersion()
 
-	r.Add("node1", 100) // re-adding same node
+	r.Add("node1", 100) // re-adding the same (nodeID, count) should be a true no-op
 	v2 := r.GetVersion()
 
-	// Version changes because re-adding rebuilds virtual nodes with same result,
-	// but the topology is equivalent. What matters: Get still returns node1.
-	owners := r.Get("key")
-	if len(owners) != 1 || owners[0] != "node1" {
+	if v1 != v2 {
+		t.Errorf("version changed on idempotent re-add: %d -> %d", v1, v2)
+	}
+	if owners := r.Get("key"); len(owners) != 1 || owners[0] != "node1" {
 		t.Errorf("Get after idempotent Add: got %v, want [node1]", owners)
 	}
-	_ = v1
-	_ = v2
 }
 
 func TestAdd_ReplacesVirtualNodes(t *testing.T) {
@@ -44,11 +42,20 @@ func TestAdd_ReplacesVirtualNodes(t *testing.T) {
 	r.Add("b", 100)
 	r.Add("c", 100)
 
-	// Re-add "a" with different vnode count; ring should still be consistent.
+	// Re-add "a" with a different vnode count — its old vnodes must be
+	// replaced, not left behind alongside the new ones.
 	r.Add("a", 200)
 
-	nodes := r.GetNodes()
-	if len(nodes) != 3 {
+	count := 0
+	for _, v := range r.vNodes {
+		if v.nodeID == "a" {
+			count++
+		}
+	}
+	if count != 200 {
+		t.Errorf("node a should have exactly 200 vnodes after re-add, got %d (old ones weren't replaced)", count)
+	}
+	if nodes := r.GetNodes(); len(nodes) != 3 {
 		t.Errorf("expected 3 nodes after re-add, got %d", len(nodes))
 	}
 }

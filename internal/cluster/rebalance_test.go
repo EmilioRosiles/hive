@@ -8,6 +8,33 @@ import (
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
+// -- rebalancer creation --
+
+func TestNewCluster_ZeroMemLimit_NoopRebalancer(t *testing.T) {
+	m, err := NewCluster(Config{NodeID: "self", ReplicationFactor: 1, MemLimit: 0, CleanupInterval: time.Second})
+	if err != nil {
+		t.Fatalf("NewCluster: %v", err)
+	}
+	defer m.Shutdown()
+	if m.rebalancer == nil {
+		t.Fatal("rebalancer should still exist (as a no-op)")
+	}
+	if m.rebalancer.enabled {
+		t.Error("a MemLimit=0 node never owns keys, so its rebalancer should be a no-op")
+	}
+}
+
+func TestNewCluster_NonZeroMemLimit_ActiveRebalancer(t *testing.T) {
+	m, err := NewCluster(Config{NodeID: "self", ReplicationFactor: 1, MemLimit: 256 << 20, CleanupInterval: time.Second})
+	if err != nil {
+		t.Fatalf("NewCluster: %v", err)
+	}
+	defer m.Shutdown()
+	if !m.rebalancer.enabled {
+		t.Error("a node that owns keyspace needs an active rebalancer")
+	}
+}
+
 // -- migrationTargets --
 
 func TestMigrationTargets_ReturnsNewOnly(t *testing.T) {

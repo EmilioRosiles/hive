@@ -451,7 +451,9 @@ func TestApplyIfNewer_SameTimestamp_KeepsExisting(t *testing.T) {
 	second := val("second")
 	second.setMTime(ts) // identical timestamp
 
-	ds.ApplyIfNewer("k", second) //nolint
+	if err := ds.ApplyIfNewer("k", second); err != nil {
+		t.Fatalf("ApplyIfNewer: %v", err)
+	}
 	e, _ := ds.Get("k")
 	if string(e.(*ValueStructure).Data) != "first" {
 		t.Errorf("same-timestamp should keep existing; got %q", e.(*ValueStructure).Data)
@@ -463,7 +465,9 @@ func TestApplyIfNewer_UsedAccountingNewKey(t *testing.T) {
 	v := val("hello")
 	v.setMTime(uint32(time.Now().Unix()))
 
-	ds.ApplyIfNewer("k", v) //nolint
+	if err := ds.ApplyIfNewer("k", v); err != nil {
+		t.Fatalf("ApplyIfNewer: %v", err)
+	}
 	want := entrySize("k", "hello")
 	if got := ds.used.Load(); got != want {
 		t.Errorf("used after ApplyIfNewer insert: got %d, want %d", got, want)
@@ -477,7 +481,9 @@ func TestApplyIfNewer_UsedAccountingReplace(t *testing.T) {
 	longer := val("much-longer")
 	longer.setMTime(uint32(time.Now().Add(time.Hour).Unix()))
 
-	ds.ApplyIfNewer("k", longer) //nolint
+	if err := ds.ApplyIfNewer("k", longer); err != nil {
+		t.Fatalf("ApplyIfNewer: %v", err)
+	}
 	want := entrySize("k", "much-longer")
 	if got := ds.used.Load(); got != want {
 		t.Errorf("used after ApplyIfNewer replace: got %d, want %d", got, want)

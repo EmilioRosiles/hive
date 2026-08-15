@@ -15,15 +15,22 @@ import (
 // newTestCluster builds a minimal Cluster for unit tests.
 // No TCP server, gossip loop, or janitor is started.
 func newTestCluster(nodeID string) *Cluster {
-	r := ring.New(1)
+	return newTestClusterRF(nodeID, 1)
+}
+
+// newTestClusterRF mirrors newTestCluster with an explicit ReplicationFactor,
+// for tests that need an active (non-no-op) replicator — see newReplicator.
+func newTestClusterRF(nodeID string, rf int) *Cluster {
+	r := ring.New(rf)
 	r.Add(nodeID, 100) // arbitrary nonzero vnode count for this no-network fixture
 	m := &Cluster{
 		cfg: Config{
 			NodeID:               nodeID,
-			ReplicationFactor:    1,
+			ReplicationFactor:    rf,
 			RoutingTimeout:       time.Second,
 			ReplicationQueueSize: 64,
 			ReplicationBatchSize: 16,
+			MemLimit:             256 << 20, // nonzero so this fixture's rebalancer isn't a no-op
 		},
 		ring:        r,
 		store:       store.NewDataStore(math.MaxInt64), // capacity is enforced literally; this fixture doesn't want a cap
@@ -39,12 +46,17 @@ func newTestCluster(nodeID string) *Cluster {
 
 // ps builds a PeerState for use in mergeState calls.
 func ps(nodeID, addr string, status NodeStatus, incarnation uint64) transport.PeerState {
+	return psRF(nodeID, addr, status, incarnation, 1)
+}
+
+// psRF mirrors ps with an explicit ReplicationFactor.
+func psRF(nodeID, addr string, status NodeStatus, incarnation uint64, rf int) transport.PeerState {
 	return transport.PeerState{
 		NodeID:            nodeID,
 		Addr:              addr,
 		Status:            uint8(status),
 		Incarnation:       incarnation,
-		ReplicationFactor: 1,
+		ReplicationFactor: rf,
 		MemLimit:          256 << 20, // realistic nonzero vnode count; 0 now means "owns nothing"
 	}
 }
@@ -52,9 +64,9 @@ func ps(nodeID, addr string, status NodeStatus, incarnation uint64) transport.Pe
 // -- addPeer --
 
 func TestAddPeer_New(t *testing.T) {
-	m := newTestCluster("self")
+	m := newTestClusterRF("self", 2)
 
-	if err := m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100)); err != nil {
+	if err := m.addPeer(psRF("peer1", "127.0.0.1:1001", NodeAlive, 100, 2)); err != nil {
 		t.Fatalf("addPeer: %v", err)
 	}
 
@@ -76,6 +88,26 @@ func TestAddPeer_New(t *testing.T) {
 	}
 }
 
+// TestAddPeer_ReplicationFactorOne_NoopReplicator verifies RF=1 gets a
+// no-op replicator (present in the map, but no jobs channel).
+func TestAddPeer_ReplicationFactorOne_NoopReplicator(t *testing.T) {
+	m := newTestCluster("self") // RF=1
+
+	if err := m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100)); err != nil {
+		t.Fatalf("addPeer: %v", err)
+	}
+	if _, ok := m.getClient("peer1"); !ok {
+		t.Error("client should still be registered — forwarding always needs it")
+	}
+	rep, ok := m.getReplicator("peer1")
+	if !ok {
+		t.Fatal("replicator entry should still exist (as a no-op) after addPeer")
+	}
+	if rep.jobs != nil {
+		t.Error("replicator should be a no-op (no jobs channel) when ReplicationFactor is 1")
+	}
+}
+
 func TestAddPeer_AlreadyAlive_NoOp(t *testing.T) {
 	m := newTestCluster("self")
 	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
@@ -89,11 +121,11 @@ func TestAddPeer_AlreadyAlive_NoOp(t *testing.T) {
 }
 
 func TestAddPeer_RevivesDead(t *testing.T) {
-	m := newTestCluster("self")
-	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
+	m := newTestClusterRF("self", 2)
+	m.addPeer(psRF("peer1", "127.0.0.1:1001", NodeAlive, 100, 2))
 	m.markDead("peer1")
 
-	if err := m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 200)); err != nil {
+	if err := m.addPeer(psRF("peer1", "127.0.0.1:1001", NodeAlive, 200, 2)); err != nil {
 		t.Fatalf("addPeer revival: %v", err)
 	}
 

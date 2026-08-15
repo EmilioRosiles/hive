@@ -142,10 +142,13 @@ func TestClusterTLS_NoClientCert_Rejected(t *testing.T) {
 	// the rejection surfaces on a subsequent I/O, not necessarily from Dial
 	// itself. Force one and confirm it fails.
 	conn.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err := conn.Write([]byte("x")); err == nil {
+	_, writeErr := conn.Write([]byte("x"))
+	var readErr error
+	if writeErr == nil {
 		buf := make([]byte, 1)
-		if _, err := conn.Read(buf); err == nil {
-			t.Fatal("expected server to reject a client presenting no certificate")
-		}
+		_, readErr = conn.Read(buf)
+	}
+	if writeErr == nil && readErr == nil {
+		t.Fatal("expected server to reject a client presenting no certificate")
 	}
 }
