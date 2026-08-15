@@ -45,11 +45,17 @@ type Config struct {
 
 	// ReplicationFactor is the number of nodes that should hold a copy
 	// of each key. Must be <= cluster size. Defaults to 1.
+	// At the default of 1, replication is a no-op and each peer's
+	// replication queue is never allocated, saving memory.
 	ReplicationFactor int
 
 	// RoutingTimeout is how long this nodes waits before cancelling a
 	// routed op (redirect/replicate).
 	RoutingTimeout time.Duration
+
+	// ConnPoolSize is the number of pooled connections maintained per peer,
+	// round-robin shared across all traffic to that peer. Defaults to 4.
+	ConnPoolSize int
 
 	// MemLimit is the maximum memory this node intends to use.
 	// It is used to compute the node's virtual node count on the hash ring:
@@ -57,6 +63,8 @@ type Config struct {
 	// nil (the zero value) means "use total system memory" (default).
 	// Use Bytes(0) for a node that owns no keyspace at all — a pure
 	// routing/relay worker that never stores or replicates data itself.
+	// Such a node also skips rebalancer bookkeeping entirely, since it can
+	// never be a migration source or target.
 	MemLimit MemLimit
 
 	// GossipInterval is how often this node sends heartbeats to peers.
@@ -130,6 +138,7 @@ func defaultConfig() Config {
 		BindAddr:             "0.0.0.0",
 		BindPort:             7946,
 		RoutingTimeout:       1 * time.Second,
+		ConnPoolSize:         4,
 		ReplicationFactor:    1,
 		MemLimit:             Bytes(sys.TotalMemory()),
 		GossipInterval:       5 * time.Second,
@@ -159,6 +168,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RoutingTimeout == 0 {
 		c.RoutingTimeout = d.RoutingTimeout
+	}
+	if c.ConnPoolSize == 0 {
+		c.ConnPoolSize = d.ConnPoolSize
 	}
 	if c.GossipInterval == 0 {
 		c.GossipInterval = d.GossipInterval

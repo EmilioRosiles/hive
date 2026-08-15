@@ -7,33 +7,34 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const defaultTimeout = 3 * time.Second
 
-// Client maintains a persistent multiplexed connection to a single peer.
-// Concurrent calls to Send are all served over the same TCP connection.
-// The connection is established lazily and re-established automatically
-// after a failure.
+// Client maintains a small pool of persistent connections to a peer, round-
+// robin selected so concurrent sends don't serialize on one connection.
 type Client struct {
 	addr      string
 	timeout   time.Duration
 	tlsConfig *tls.Config
 	mu        sync.Mutex
-	mux       *mux
+	muxes     []*mux
+	next      atomic.Uint32
 }
 
-// NewClient creates a client for addr. If tlsConfig is non-nil, connections
-// are dialed over TLS using it; nil means plaintext.
-func NewClient(addr string, tlsConfig *tls.Config) *Client {
-	return &Client{addr: addr, timeout: defaultTimeout, tlsConfig: tlsConfig}
+// NewClient creates a client for addr with a pool of poolSize connections
+// (minimum 1). If tlsConfig is non-nil, connections are dialed over TLS.
+func NewClient(addr string, tlsConfig *tls.Config, poolSize int) *Client {
+	return &Client{addr: addr, timeout: defaultTimeout, tlsConfig: tlsConfig, muxes: make([]*mux, max(1, poolSize))}
 }
 
 // Send delivers frame to the peer and returns the response.
 func (c *Client) Send(ctx context.Context, frame Frame) (Frame, error) {
+	slot := int(c.next.Add(1)-1) % len(c.muxes)
 	for attempt := range 3 {
-		m, err := c.getMux()
+		m, err := c.getMux(slot)
 		if err != nil {
 			if attempt < 2 {
 				if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
@@ -48,7 +49,7 @@ func (c *Client) Send(ctx context.Context, frame Frame) (Frame, error) {
 			return resp, nil
 		}
 		if errors.Is(err, errMuxClosed) && attempt < 2 {
-			c.invalidate(m)
+			c.invalidate(slot, m)
 			if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
 				return Frame{}, serr
 			}
@@ -68,13 +69,13 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// getMux returns the live mux, dialing a new connection if needed.
-func (c *Client) getMux() (*mux, error) {
+// getMux returns the live mux for slot, dialing a new connection if needed.
+func (c *Client) getMux(slot int) (*mux, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.mux != nil && !c.mux.closed() {
-		return c.mux, nil
+	if m := c.muxes[slot]; m != nil && !m.closed() {
+		return m, nil
 	}
 
 	var conn net.Conn
@@ -87,25 +88,27 @@ func (c *Client) getMux() (*mux, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.mux = newMux(conn)
-	return c.mux, nil
+	c.muxes[slot] = newMux(conn)
+	return c.muxes[slot], nil
 }
 
 // invalidate discards a dead mux so the next getMux dials fresh.
-func (c *Client) invalidate(dead *mux) {
+func (c *Client) invalidate(slot int, dead *mux) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.mux == dead {
-		c.mux = nil
+	if c.muxes[slot] == dead {
+		c.muxes[slot] = nil
 	}
 }
 
-// Close shuts down the client connection.
+// Close shuts down every connection in the pool.
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.mux != nil {
-		c.mux.shutdown(nil)
-		c.mux = nil
+	for i, m := range c.muxes {
+		if m != nil {
+			m.shutdown(nil)
+			c.muxes[i] = nil
+		}
 	}
 }

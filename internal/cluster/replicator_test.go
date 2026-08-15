@@ -74,15 +74,16 @@ func waitForCond(t *testing.T, timeout time.Duration, msg string, cond func() bo
 }
 
 // clusterWithPeer builds a two-node test Cluster ("self") with a live
-// replicator pointed at addr, using small queue/batch sizes so backpressure
-// and batching behavior are easy to exercise without huge write volumes.
+// replicator pointed at addr (RF=2, so it's active — see
+// TestAddPeer_ReplicationFactorOne_NoopReplicator), using small queue/batch
+// sizes so backpressure and batching behavior are easy to exercise.
 func clusterWithPeer(t *testing.T, nodeID, addr string, queueSize, batchSize int) *Cluster {
 	t.Helper()
-	m := newTestCluster(nodeID)
+	m := newTestClusterRF(nodeID, 2)
 	m.cfg.ReplicationQueueSize = queueSize
 	m.cfg.ReplicationBatchSize = batchSize
 	m.cfg.RoutingTimeout = 2 * time.Second
-	if err := m.addPeer(ps("peer", addr, NodeAlive, 1)); err != nil {
+	if err := m.addPeer(psRF("peer", addr, NodeAlive, 1, 2)); err != nil {
 		t.Fatalf("addPeer: %v", err)
 	}
 	return m

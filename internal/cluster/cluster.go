@@ -31,6 +31,7 @@ type Config struct {
 	BindPort             int
 	Seeds                []string
 	RoutingTimeout       time.Duration
+	ConnPoolSize         int
 	ReplicationFactor    int
 	MemLimit             uint64
 	GossipInterval       time.Duration
@@ -271,9 +272,9 @@ func (m *Cluster) peerStatus(nodeID string) (NodeStatus, bool) {
 }
 
 // newClient builds a transport client for addr, applying this node's TLS
-// config (nil means plaintext).
+// config (nil means plaintext) and connection pool size.
 func (m *Cluster) newClient(addr string) *transport.Client {
-	return transport.NewClient(addr, m.cfg.TLSConfig)
+	return transport.NewClient(addr, m.cfg.TLSConfig, m.cfg.ConnPoolSize)
 }
 
 // getClient returns the transport client for a peer node ID.

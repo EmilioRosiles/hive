@@ -11,28 +11,36 @@ import (
 // worker goroutine, so writes to that peer are always applied in the order
 // they were dispatched, with one goroutine per peer instead of one per write.
 type replicator struct {
-	nodeID string
-	mgr    *Cluster
-	jobs   chan transport.ForwardRequest
-	stopCh chan struct{}
-	once   sync.Once
+	mgr     *Cluster
+	once    sync.Once
+	nodeID  string
+	jobs    chan transport.ForwardRequest
+	stopCh  chan struct{}
+	enabled bool
 }
 
 func newReplicator(nodeID string, mgr *Cluster) *replicator {
 	r := &replicator{
-		nodeID: nodeID,
-		mgr:    mgr,
-		jobs:   make(chan transport.ForwardRequest, mgr.cfg.ReplicationQueueSize),
-		stopCh: make(chan struct{}),
+		mgr:     mgr,
+		nodeID:  nodeID,
+		stopCh:  make(chan struct{}),
+		enabled: mgr.cfg.ReplicationFactor > 1,
 	}
-	go r.run()
+	if r.enabled {
+		r.jobs = make(chan transport.ForwardRequest, mgr.cfg.ReplicationQueueSize)
+		go r.run()
+	}
 	return r
 }
 
 // enqueue blocks until req is queued or the peer is confirmed dead, giving
 // bounded backpressure: a full queue blocks the caller only as long as it
 // takes the worker to drain it, or to detect the peer is unreachable.
+// A no-op replicator (see newReplicator) has no jobs channel and discards req.
 func (r *replicator) enqueue(req transport.ForwardRequest) {
+	if !r.enabled {
+		return
+	}
 	select {
 	case r.jobs <- req:
 	case <-r.stopCh:

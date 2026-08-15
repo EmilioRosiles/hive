@@ -78,3 +78,82 @@ func BenchmarkCluster_ConcurrentWrites(b *testing.B) {
 		})
 	}
 }
+
+// benchForwardingCluster starts a 3-node RF=2 cluster where node 0 is a pure
+// relay (MemLimit: hive.Bytes(0)) and returns its Cluster handle, so every
+// operation the benchmark issues is forwarded cross-node.
+func benchForwardingCluster(b *testing.B) *hive.Cluster {
+	b.Helper()
+	relay, relayCluster := clusterNodeWithMemLimit(b, nil, 2, hive.Bytes(0))
+	_, c2 := clusterNode(b, []string{addr(relay)}, 2)
+	_, c3 := clusterNode(b, []string{addr(relay)}, 2)
+	waitFor(b, 5*time.Second, "cluster formed", func() bool {
+		return relayCluster.AliveCount() == 3 && c2.AliveCount() == 3 && c3.AliveCount() == 3
+	})
+	return relayCluster
+}
+
+// BenchmarkCluster_ForwardedSet measures Set latency/throughput when every
+// operation must be routed cross-node — see benchForwardingCluster.
+func BenchmarkCluster_ForwardedSet(b *testing.B) {
+	cache := benchForwardingCluster(b)
+	store := hive.NewValueStore[Session](cache, "bench")
+	v := Session{UserID: 1, Token: "bench-token"}
+
+	b.Run("SingleThreaded", func(b *testing.B) {
+		b.ResetTimer()
+		for i := range b.N {
+			if err := store.Set(fmt.Sprintf("k-%d", i%benchKeySpace), v); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("Concurrent", func(b *testing.B) {
+		var counter atomic.Uint64
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				n := counter.Add(1)
+				key := fmt.Sprintf("k-%d", n%benchKeySpace)
+				if err := store.Set(key, v); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	})
+}
+
+// BenchmarkCluster_ForwardedGet mirrors BenchmarkCluster_ForwardedSet for
+// Get, pre-populating the key space before timing starts.
+func BenchmarkCluster_ForwardedGet(b *testing.B) {
+	cache := benchForwardingCluster(b)
+	store := hive.NewValueStore[Session](cache, "bench")
+	v := Session{UserID: 1, Token: "bench-token"}
+	for i := range benchKeySpace {
+		if err := store.Set(fmt.Sprintf("k-%d", i), v); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.Run("SingleThreaded", func(b *testing.B) {
+		b.ResetTimer()
+		for i := range b.N {
+			if _, err := store.Get(fmt.Sprintf("k-%d", i%benchKeySpace)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("Concurrent", func(b *testing.B) {
+		var counter atomic.Uint64
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				n := counter.Add(1)
+				key := fmt.Sprintf("k-%d", n%benchKeySpace)
+				if _, err := store.Get(key); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	})
+}

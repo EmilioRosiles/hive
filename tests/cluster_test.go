@@ -79,37 +79,6 @@ func TestCluster_SetStoreAcrossNodes(t *testing.T) {
 	}
 }
 
-func TestCluster_RebalanceOnJoin(t *testing.T) {
-	n1, c1 := clusterNode(t, nil, 1)
-	n2, _ := clusterNode(t, []string{addr(n1)}, 1)
-
-	waitFor(t, 1*time.Second, "2-node cluster formed", func() bool {
-		return n1.Cluster().AliveCount() == 2 && n2.Cluster().AliveCount() == 2
-	})
-
-	store := hive.NewValueStore[Session](c1, "sessions")
-	keys := make([]string, 20)
-	for i := range keys {
-		keys[i] = fmt.Sprintf("key-%d", i)
-		store.Set(keys[i], Session{UserID: i})
-	}
-
-	// Add a third node and wait for rebalance.
-	n3, c3 := clusterNode(t, []string{addr(n1)}, 1)
-	waitFor(t, 1*time.Second, "3-node cluster formed", func() bool {
-		return n1.Cluster().AliveCount() == 3 && n3.Cluster().AliveCount() == 3
-	})
-	time.Sleep(300 * time.Millisecond) // let rebalance settle
-
-	// All keys must still be readable from any node.
-	store3 := hive.NewValueStore[Session](c3, "sessions")
-	for _, k := range keys {
-		if _, err := store3.Get(k); err != nil {
-			t.Errorf("Get %q from new node after rebalance: %v", k, err)
-		}
-	}
-}
-
 // TestCluster_RebalanceOnJoin_ValueIntegrity verifies that after a new node
 // joins and rebalance migrates keys, every node returns the correct values —
 // not just a non-error response.
@@ -179,29 +148,33 @@ func TestCluster_NodeLeave_RF2(t *testing.T) {
 		}
 	}
 
-	// Give async replica fanout time to settle before n3 departs.
+	// Give async replica fanout time to settle before n1 departs.
 	time.Sleep(100 * time.Millisecond)
 
-	// n3 leaves gracefully; peers immediately evict it and trigger rebalance.
+	// n1 leaves gracefully; peers immediately evict it and trigger rebalance.
 	n1.Shutdown()
 	waitFor(t, 2*time.Second, "n1 gone", func() bool {
-		fmt.Printf("%v \n", n2.Cluster().AliveCount())
 		return n2.Cluster().AliveCount() == 2 && n3.Cluster().AliveCount() == 2
 	})
 	time.Sleep(200 * time.Millisecond) // let rebalance settle
 
 	// All keys must be readable with correct values from both remaining nodes.
-	s2 := hive.NewValueStore[Session](c2, "sessions")
-	s3 := hive.NewValueStore[Session](c3, "sessions")
+	survivors := []struct {
+		name  string
+		store *hive.ValueStore[Session]
+	}{
+		{"n2", hive.NewValueStore[Session](c2, "sessions")},
+		{"n3", hive.NewValueStore[Session](c3, "sessions")},
+	}
 	for i, k := range keys {
-		for node, s := range []*hive.ValueStore[Session]{s2, s3} {
-			got, err := s.Get(k)
+		for _, sv := range survivors {
+			got, err := sv.store.Get(k)
 			if err != nil {
-				t.Errorf("after n3 leave, node %d Get %q: %v", node+1, k, err)
+				t.Errorf("after n1 leave, %s Get %q: %v", sv.name, k, err)
 				continue
 			}
 			if got.UserID != i || got.Token != k {
-				t.Errorf("after n3 leave, node %d Get %q: got %+v, want {UserID:%d Token:%q}", node+1, k, got, i, k)
+				t.Errorf("after n1 leave, %s Get %q: got %+v, want {UserID:%d Token:%q}", sv.name, k, got, i, k)
 			}
 		}
 	}
