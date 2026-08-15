@@ -329,11 +329,8 @@ hive.Config{
     // ConnPoolSize is the number of pooled TCP connections maintained per
     // peer, round-robin shared across all traffic to that peer (forwarded
     // reads/writes, replication, gossip, rebalance). Higher values reduce
-    // contention under concurrent load at the cost of more sockets and
-    // goroutines per peer: a node's footprint is roughly
-    // 2 * peers * ConnPoolSize sockets (outbound + inbound). Set to 1 to
-    // recover the old single-connection-per-peer behavior for fd/memory-
-    // constrained deployments. Default: 4
+    // contention under concurrent load at the cost of more sockets.
+    // Default: 4
     ConnPoolSize int
 
     // Maximum memory this node intends to use.
