@@ -1,5 +1,7 @@
 # hive
 
+[![CI](https://github.com/EmilioRosiles/hive/actions/workflows/ci.yml/badge.svg)](https://github.com/EmilioRosiles/hive/actions/workflows/ci.yml)
+
 An embeddable, leaderless distributed cache for Go applications. Drop it into any Go service to share in-memory state across instances — no external infrastructure required.
 
 ```go
