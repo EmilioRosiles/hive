@@ -470,6 +470,10 @@ Each stored entry carries an `mtime` timestamp (Unix seconds, set at the time of
 
 **Connection pool size** — each known peer gets `ConnPoolSize` connections (default 4), dialed lazily as traffic flows. Budget roughly `2 × peers × ConnPoolSize` sockets per node; for very large clusters, raise `ulimit -n` or lower `ConnPoolSize`.
 
+## Development
+
+Parts of this project were written with the assistance of AI tools (Claude Code), like the transport, some of the data structure implementations, testing, and documentation. All design decisions and code were carefully reviewed by the maintainer.
+
 ## License
 
 MIT
