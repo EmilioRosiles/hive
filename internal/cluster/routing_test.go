@@ -130,11 +130,9 @@ func TestHandleForward_UnknownOp_ReturnsError(t *testing.T) {
 // -- execOrForward ctx/RoutingTimeout interaction --
 
 // newForwardingTestCluster builds a two-node fixture ("self" + "peer") where
-// self owns no vnodes, so every key's primary owner is "peer" — forcing
-// dispatch/execOrForward down the forward branch instead of the local fast
-// path. peer is a fake in-process transport.Server that blocks every
-// MsgForward it receives on gate, standing in for an unresponsive remote
-// primary so tests can assert on how long the caller actually waits.
+// self owns no vnodes, so every key routes to peer — a fake in-process
+// server that blocks every MsgForward it receives on gate, standing in for
+// an unresponsive remote primary.
 func newForwardingTestCluster(t *testing.T, gate chan struct{}) *Cluster {
 	t.Helper()
 	srv, err := transport.NewServer("127.0.0.1:0", func(msgType transport.MsgType, payload []byte) ([]byte, error) {
@@ -155,10 +153,9 @@ func newForwardingTestCluster(t *testing.T, gate chan struct{}) *Cluster {
 	return m
 }
 
-// TestExecOrForward_CallerDeadlineShorterThanRoutingTimeout_WinsOut proves
-// that execOrForward derives its network-hop deadline from the incoming ctx
-// (context.WithTimeout(ctx, RoutingTimeout)), so a caller's tighter deadline
-// aborts the wait even when RoutingTimeout is much looser.
+// TestExecOrForward_CallerDeadlineShorterThanRoutingTimeout_WinsOut confirms
+// a caller's tighter deadline aborts the wait even when RoutingTimeout is
+// much looser.
 func TestExecOrForward_CallerDeadlineShorterThanRoutingTimeout_WinsOut(t *testing.T) {
 	gate := make(chan struct{}) // never closed — peer never responds
 	m := newForwardingTestCluster(t, gate)
@@ -191,10 +188,8 @@ func TestExecOrForward_CallerDeadlineShorterThanRoutingTimeout_WinsOut(t *testin
 	}
 }
 
-// TestExecOrForward_BareBackgroundContext_StillBoundedByRoutingTimeout is a
-// regression test for the pre-ctx behavior: a caller that doesn't set its own
-// deadline (context.Background()) must still have the forward bounded by
-// RoutingTimeout, not hang forever.
+// TestExecOrForward_BareBackgroundContext_StillBoundedByRoutingTimeout
+// confirms a caller with no deadline is still bounded by RoutingTimeout.
 func TestExecOrForward_BareBackgroundContext_StillBoundedByRoutingTimeout(t *testing.T) {
 	gate := make(chan struct{}) // never closed — peer never responds
 	m := newForwardingTestCluster(t, gate)
@@ -224,5 +219,74 @@ func TestExecOrForward_BareBackgroundContext_StillBoundedByRoutingTimeout(t *tes
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a bare context.Background() must still be bounded by RoutingTimeout, not hang forever")
+	}
+}
+
+// -- lock guard integration (dispatch -> the per-op CheckLock calls) --
+
+func TestDispatch_LockedKey_RejectsOtherOps(t *testing.T) {
+	m := newTestCluster("self")
+
+	if _, err := m.dispatch(t.Context(), transport.OpLock, "k", lockArgs(time.Minute, 42)...); err != nil {
+		t.Fatalf("dispatch Lock: %v", err)
+	}
+
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, "k", []byte("v")); !errors.Is(err, ErrKeyLocked) {
+		t.Errorf("Set on locked key: got %v, want ErrKeyLocked", err)
+	}
+	if _, err := m.dispatch(t.Context(), transport.OpValueGet, "k"); !errors.Is(err, ErrKeyLocked) {
+		t.Errorf("Get on locked key: got %v, want ErrKeyLocked", err)
+	}
+	if _, err := m.dispatch(t.Context(), transport.OpDel, "k"); !errors.Is(err, ErrKeyLocked) {
+		t.Errorf("Del on locked key: got %v, want ErrKeyLocked", err)
+	}
+}
+
+func TestDispatch_LockedKey_AuthorizedTokenBypassesGuard(t *testing.T) {
+	m := newTestCluster("self")
+
+	const token = 42
+	if _, err := m.dispatch(t.Context(), transport.OpLock, "k", lockArgs(time.Minute, token)...); err != nil {
+		t.Fatalf("dispatch Lock: %v", err)
+	}
+
+	authCtx := WithLockToken(t.Context(), token)
+	if _, err := m.dispatch(authCtx, transport.OpValueSet, "k", []byte("v")); err != nil {
+		t.Errorf("Set with authorized token should succeed, got %v", err)
+	}
+	if _, err := m.dispatch(authCtx, transport.OpValueGet, "k"); err != nil {
+		t.Errorf("Get with authorized token should succeed, got %v", err)
+	}
+
+	// A different (wrong) token must still be rejected.
+	wrongCtx := WithLockToken(t.Context(), token+1)
+	if _, err := m.dispatch(wrongCtx, transport.OpValueGet, "k"); !errors.Is(err, ErrKeyLocked) {
+		t.Errorf("Get with wrong token: got %v, want ErrKeyLocked", err)
+	}
+}
+
+func TestDispatch_UnlockAndRenew_BypassGuardAndWork(t *testing.T) {
+	m := newTestCluster("self")
+
+	const token = 42
+	if _, err := m.dispatch(t.Context(), transport.OpLock, "k", lockArgs(time.Minute, token)...); err != nil {
+		t.Fatalf("dispatch Lock: %v", err)
+	}
+	tokenArg := encodeUint32(token)
+
+	// Renew, called with no special context, must not be rejected by the
+	// blanket guard even though the key is locked.
+	if _, err := m.dispatch(t.Context(), transport.OpRenew, "k", tokenArg, ttlArg(time.Minute)); err != nil {
+		t.Errorf("Renew should bypass the guard, got %v", err)
+	}
+
+	// Unlock likewise.
+	if _, err := m.dispatch(t.Context(), transport.OpUnlock, "k", tokenArg); err != nil {
+		t.Errorf("Unlock should bypass the guard, got %v", err)
+	}
+
+	// Key should be unlocked now — an ordinary op should succeed.
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, "k", []byte("v")); err != nil {
+		t.Errorf("Set after Unlock should succeed, got %v", err)
 	}
 }

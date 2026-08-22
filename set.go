@@ -78,3 +78,9 @@ func (s *SetStore) Expire(ctx context.Context, key string, ttl time.Duration) er
 	_, err := s.cluster.exec(ctx, transport.OpExpire, s.prefix+key, encodeTTL(ttl))
 	return err
 }
+
+// Lock acquires a distributed lock on key, valid for ttl. Returns ErrKeyLocked
+// if key is already locked.
+func (s *SetStore) Lock(ctx context.Context, key string, ttl time.Duration) (*Lock, error) {
+	return newLock(ctx, s.cluster, s.prefix+key, ttl)
+}

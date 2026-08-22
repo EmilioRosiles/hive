@@ -14,6 +14,10 @@ import (
 // its configured memory limit. Add more nodes to the cluster to increase capacity.
 var ErrCapacityExceeded = errors.New("hive: node memory limit reached")
 
+// ErrKeyLocked is returned by any op against a key that is currently locked,
+// unless the provided token matches the current holder's (see CheckLock).
+var ErrKeyLocked = errors.New("hive: key is locked")
+
 // Kind identifies the type of data structure stored under a key.
 type Kind uint8
 
@@ -35,10 +39,19 @@ type DataStructure interface {
 	Encode() ([]byte, error)
 	// KeyExpiry returns the key-level expiry as a Unix timestamp in seconds,
 	// or 0 if there is no expiry.
-	KeyExpiry() int64
+	KeyExpiry() uint32
 	// SetKeyExpiry sets the key-level expiry as a Unix timestamp in seconds.
 	// Pass 0 to clear the expiry.
-	SetKeyExpiry(unixSec int64)
+	SetKeyExpiry(unixSec uint32)
+	// LockToken returns the current lock's fencing token. Only meaningful
+	// when LockExpiry is non-zero and unexpired.
+	LockToken() uint32
+	// LockExpiry returns the lock's expiry as a Unix timestamp in seconds,
+	// or 0 if the key is not currently locked.
+	LockExpiry() uint32
+	// SetLock sets the lock's fencing token and expiry. Pass token=0,
+	// expiresAt=0 to clear the lock.
+	SetLock(token uint32, expiresAt uint32)
 	// ByteSize returns the estimated in-memory byte cost of this value (excluding
 	// the key and per-entry overhead, which are added by the DataStore).
 	ByteSize() int64
@@ -69,13 +82,40 @@ type mtimeBase struct {
 func (b *mtimeBase) MTime() uint32     { return b.mtime }
 func (b *mtimeBase) setMTime(t uint32) { b.mtime = t }
 
+// lockBase holds an optional distributed-lock fencing token and its expiry.
+// Embed it in each concrete DataStructure type alongside sizeBase/mtimeBase.
+type lockBase struct {
+	lockToken     uint32
+	lockExpiresAt uint32 // unix seconds, 0 = not locked
+}
+
+func (b *lockBase) LockToken() uint32  { return b.lockToken }
+func (b *lockBase) LockExpiry() uint32 { return b.lockExpiresAt }
+func (b *lockBase) SetLock(token uint32, expiresAt uint32) {
+	b.lockToken = token
+	b.lockExpiresAt = expiresAt
+}
+
+// CheckLock returns ErrKeyLocked if e is locked by a token other than the
+// one provided. Call it from inside a Read/Apply callback, not a separate
+// lookup, so it can't race a concurrent lock change.
+func CheckLock(e DataStructure, token uint32) error {
+	if e == nil {
+		return nil
+	}
+	if exp := e.LockExpiry(); exp != 0 && exp > uint32(time.Now().Unix()) && e.LockToken() != token {
+		return ErrKeyLocked
+	}
+	return nil
+}
+
 // -- DataStore --
 
 // Byte-size constants for struct fields shared across all DataStructure types.
 const (
 	entryOverhead     = 64 // per-entry cost added to ByteSize() to account for the map bucket allocation
 	mtimeSize         = 4  // mtimeBase.mtime uint32
-	keyExpirySize     = 8  // key-level expiresAt int64
+	keyExpirySize     = 4  // key-level expiresAt uint32
 	mapEntryOverhead  = 16 // per-item cost in the zset scores map: float64 score (8) + map bucket (8)
 	mapBucketOverhead = 8  // per-item map bucket cost for maps
 	sliceItemOverhead = 24 // per-element cost in [][]byte slices: slice header (pointer+len+cap = 24)
@@ -204,7 +244,7 @@ func (ds *DataStore) Get(key string) (DataStructure, bool) {
 	if !ok {
 		return nil, false
 	}
-	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() >= exp {
+	if exp := e.KeyExpiry(); exp != 0 && uint32(time.Now().Unix()) >= exp {
 		return nil, false
 	}
 	return e, true
@@ -236,27 +276,27 @@ func (ds *DataStore) Expire(key string, ttl time.Duration) bool {
 	if ttl == 0 {
 		e.SetKeyExpiry(0)
 	} else {
-		e.SetKeyExpiry(time.Now().Add(ttl).Unix())
+		e.SetKeyExpiry(uint32(time.Now().Add(ttl).Unix()))
 	}
 	return true
 }
 
-// Read runs fn under the shard read lock for key.
-// fn is only called if the key exists and has not expired.
+// Read runs fn under the shard read lock for key, returning whatever error fn
+// returns. fn is only called if the key exists and has not expired.
 // fn must not block or write.
-func (ds *DataStore) Read(key string, fn func(DataStructure)) {
+func (ds *DataStore) Read(key string, fn func(DataStructure) error) error {
 	s := ds.getShard(key)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	e, ok := s.data[key]
 	if !ok {
-		return
+		return nil
 	}
-	if exp := e.KeyExpiry(); exp != 0 && time.Now().Unix() >= exp {
-		return
+	if exp := e.KeyExpiry(); exp != 0 && uint32(time.Now().Unix()) >= exp {
+		return nil
 	}
-	fn(e)
+	return fn(e)
 }
 
 // Apply runs fn under the shard write lock for key, replacing the stored entry
@@ -311,7 +351,7 @@ func (ds *DataStore) ApplyIfNewer(key string, incoming DataStructure) error {
 
 // Scan iterates over all live (non-expired) entries. Pass cursor=-1 to scan all shards.
 func (ds *DataStore) Scan(cursor, count int, fn func(key string, e DataStructure)) {
-	now := time.Now().Unix()
+	now := uint32(time.Now().Unix())
 	start, end := cursor, cursor+count
 	if cursor == -1 {
 		start, end = 0, int(ds.shardsCount)
@@ -354,7 +394,7 @@ func shardCount() uint64 {
 // DeleteExpired sweeps all shards, removing entries whose key-level TTL has
 // elapsed. Called by the cluster janitor on each cleanup tick.
 func (ds *DataStore) DeleteExpired() {
-	nowUnix := time.Now().Unix()
+	nowUnix := uint32(time.Now().Unix())
 	for i := range ds.shardsCount {
 		s := ds.shards[i]
 		s.mu.Lock()

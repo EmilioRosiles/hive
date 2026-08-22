@@ -10,17 +10,18 @@ import (
 type SetStructure struct {
 	sizeBase
 	mtimeBase
+	lockBase
 	members   map[string]struct{}
-	expiresAt int64 // key-level expiry, unix seconds, 0 = no expiry
+	expiresAt uint32 // key-level expiry, unix seconds, 0 = no expiry
 }
 
 func NewSetStructure() *SetStructure {
 	return &SetStructure{members: make(map[string]struct{})}
 }
 
-func (s *SetStructure) Kind() Kind           { return KindSet }
-func (s *SetStructure) KeyExpiry() int64     { return s.expiresAt }
-func (s *SetStructure) SetKeyExpiry(t int64) { s.expiresAt = t }
+func (s *SetStructure) Kind() Kind            { return KindSet }
+func (s *SetStructure) KeyExpiry() uint32     { return s.expiresAt }
+func (s *SetStructure) SetKeyExpiry(t uint32) { s.expiresAt = t }
 
 func (s *SetStructure) ByteSize() int64 {
 	var n int64
@@ -64,13 +65,18 @@ func (s *SetStructure) Card() int {
 
 // wireSet is the msgpack-serializable form of SetStructure.
 type wireSet struct {
-	Members   map[string]struct{} `msgpack:"m"`
-	ExpiresAt int64               `msgpack:"e"`
-	MTime     uint32              `msgpack:"mt"`
+	Members       map[string]struct{} `msgpack:"m"`
+	ExpiresAt     uint32              `msgpack:"e"`
+	MTime         uint32              `msgpack:"mt"`
+	LockToken     uint32              `msgpack:"lt"`
+	LockExpiresAt uint32              `msgpack:"le"`
 }
 
 func (s *SetStructure) Encode() ([]byte, error) {
-	return msgpack.Marshal(wireSet{Members: s.members, ExpiresAt: s.expiresAt, MTime: s.mtime})
+	return msgpack.Marshal(wireSet{
+		Members: s.members, ExpiresAt: s.expiresAt, MTime: s.mtime,
+		LockToken: s.lockToken, LockExpiresAt: s.lockExpiresAt,
+	})
 }
 
 func DecodeSetStructure(data []byte) (*SetStructure, error) {
@@ -83,5 +89,7 @@ func DecodeSetStructure(data []byte) (*SetStructure, error) {
 	}
 	ss := &SetStructure{members: w.Members, expiresAt: w.ExpiresAt}
 	ss.mtime = w.MTime
+	ss.lockToken = w.LockToken
+	ss.lockExpiresAt = w.LockExpiresAt
 	return ss, nil
 }

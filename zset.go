@@ -116,6 +116,12 @@ func (z *ZSetStore) Expire(ctx context.Context, key string, ttl time.Duration) e
 	return err
 }
 
+// Lock acquires a distributed lock on key, valid for ttl. Returns ErrKeyLocked
+// if key is already locked.
+func (z *ZSetStore) Lock(ctx context.Context, key string, ttl time.Duration) (*Lock, error) {
+	return newLock(ctx, z.cluster, z.prefix+key, ttl)
+}
+
 // decodeZSetEntries parses alternating [member, score, ...] byte slices.
 func decodeZSetEntries(results [][]byte) []ZSetEntry {
 	out := make([]ZSetEntry, 0, len(results)/2)

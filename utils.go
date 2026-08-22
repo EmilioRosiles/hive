@@ -37,6 +37,11 @@ func decodeFloat64(b []byte) float64 {
 	return math.Float64frombits(binary.BigEndian.Uint64(b))
 }
 
+// encodeUint32 encodes n as a 4-byte big-endian slice.
+func encodeUint32(n uint32) []byte {
+	return binary.BigEndian.AppendUint32(nil, n)
+}
+
 // encode serializes v to msgpack bytes.
 func encode[T any](v T) ([]byte, error) { return msgpack.Marshal(v) }
 

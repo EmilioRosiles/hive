@@ -63,7 +63,7 @@ func TestNewValueStructureWithTTL(t *testing.T) {
 	if v.KeyExpiry() == 0 {
 		t.Error("NewValueStructureWithTTL: expiry should be set")
 	}
-	if v.KeyExpiry() <= time.Now().Unix() {
+	if v.KeyExpiry() <= uint32(time.Now().Unix()) {
 		t.Error("NewValueStructureWithTTL: expiry should be in the future")
 	}
 }

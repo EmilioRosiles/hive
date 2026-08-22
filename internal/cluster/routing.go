@@ -36,7 +36,7 @@ func (m *Cluster) handleForward(payload []byte) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("handler: unknown op %d", req.Op)
 	}
-	results, err := def.Exec(m, req.Key, req.Args)
+	results, err := def.Exec(m, req.Key, req.Args, req.LockToken)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func (m *Cluster) handleForwardBatch(payload []byte) error {
 			}
 			continue
 		}
-		if _, err := def.Exec(m, req.Key, req.Args); err != nil && firstErr == nil {
+		if _, err := def.Exec(m, req.Key, req.Args, req.LockToken); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -84,22 +84,23 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 	}
 
 	nodes := m.responsibleNodes(key)
+	token := lockTokenFromContext(ctx)
 
 	switch def.Scope {
 	case ScopeRead:
-		return m.execOrForward(ctx, def, op, key, args, nodes)
+		return m.execOrForward(ctx, def, op, key, args, nodes, token)
 
 	case ScopeWrite:
-		result, err := m.execOrForward(ctx, def, op, key, args, nodes)
+		result, err := m.execOrForward(ctx, def, op, key, args, nodes, token)
 		if err != nil {
 			return nil, err
 		}
-		req := transport.ForwardRequest{Op: op, Key: key, Args: args}
+		req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
 		m.fanOutReplicas(def, req, nodes[1:])
 		return result, nil
 
 	case ScopeLocal:
-		return def.Exec(m, key, args)
+		return def.Exec(m, key, args, token)
 	}
 
 	return nil, fmt.Errorf("cluster: unhandled scope for op %d", op)
@@ -108,13 +109,13 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 // execOrForward runs op locally if this node is the primary owner for key (or
 // there is no other node), otherwise forwards it to the primary and returns
 // its response.
-func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op, key string, args [][]byte, nodes []string) ([][]byte, error) {
+func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op, key string, args [][]byte, nodes []string, token uint32) ([][]byte, error) {
 	if len(nodes) == 0 || m.cfg.NodeID == nodes[0] {
-		return def.Exec(m, key, args)
+		return def.Exec(m, key, args, token)
 	}
 	ctx, cancel := context.WithTimeout(ctx, m.cfg.RoutingTimeout)
 	defer cancel()
-	resp, err := m.sendForward(ctx, nodes[0], transport.ForwardRequest{Op: op, Key: key, Args: args})
+	resp, err := m.sendForward(ctx, nodes[0], transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token})
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +130,7 @@ func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op,
 func (m *Cluster) fanOutReplicas(def opDef, req transport.ForwardRequest, nodes []string) {
 	for _, nodeID := range nodes {
 		if nodeID == m.cfg.NodeID {
-			def.Exec(m, req.Key, req.Args)
+			def.Exec(m, req.Key, req.Args, req.LockToken)
 			continue
 		}
 		if rep, ok := m.getReplicator(nodeID); ok {

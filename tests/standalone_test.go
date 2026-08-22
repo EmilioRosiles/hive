@@ -235,3 +235,152 @@ func TestNamespaceIsolation(t *testing.T) {
 		t.Fatalf("counters.Get: got (%d, %v)", n, err)
 	}
 }
+
+// -- Lock --
+
+func TestLock_AcquireAndUnlock(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	lock, err := store.Lock(t.Context(), "s1", time.Minute)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	if err := lock.Unlock(t.Context()); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+
+	// Unlocked now — a second Lock should succeed.
+	if _, err := store.Lock(t.Context(), "s1", time.Minute); err != nil {
+		t.Errorf("Lock after Unlock should succeed, got %v", err)
+	}
+}
+
+func TestLock_AlreadyLocked_ReturnsErrKeyLocked(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	if _, err := store.Lock(t.Context(), "s1", time.Minute); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	if _, err := store.Lock(t.Context(), "s1", time.Minute); !errors.Is(err, hive.ErrKeyLocked) {
+		t.Errorf("second Lock: got %v, want ErrKeyLocked", err)
+	}
+}
+
+func TestLock_BlocksOrdinaryOpsForEveryoneIncludingHolder(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	store.Set(t.Context(), "s1", Session{UserID: 1})
+	if _, err := store.Lock(t.Context(), "s1", time.Minute); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	if _, err := store.Get(t.Context(), "s1"); !errors.Is(err, hive.ErrKeyLocked) {
+		t.Errorf("Get on locked key (no auth): got %v, want ErrKeyLocked", err)
+	}
+	if err := store.Set(t.Context(), "s1", Session{UserID: 2}); !errors.Is(err, hive.ErrKeyLocked) {
+		t.Errorf("Set on locked key (no auth): got %v, want ErrKeyLocked", err)
+	}
+	if err := store.Del(t.Context(), "s1"); !errors.Is(err, hive.ErrKeyLocked) {
+		t.Errorf("Del on locked key (no auth): got %v, want ErrKeyLocked", err)
+	}
+}
+
+func TestLock_ContextAuthorizesHolderOps(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	lock, err := store.Lock(t.Context(), "s1", time.Minute)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	authCtx := lock.Context()
+	if err := store.Set(authCtx, "s1", Session{UserID: 1, Token: "in-critical-section"}); err != nil {
+		t.Fatalf("Set with lock.Context(): %v", err)
+	}
+	got, err := store.Get(authCtx, "s1")
+	if err != nil {
+		t.Fatalf("Get with lock.Context(): %v", err)
+	}
+	if got.Token != "in-critical-section" {
+		t.Errorf("got %+v, want Token=in-critical-section", got)
+	}
+
+	// The lock must still be held after an authorized Set — Set must not
+	// silently clear it as a side effect of overwriting the entry.
+	if _, err := store.Get(t.Context(), "s1"); !errors.Is(err, hive.ErrKeyLocked) {
+		t.Errorf("Get without auth after authorized Set: got %v, want ErrKeyLocked (lock should survive)", err)
+	}
+
+	if err := lock.Unlock(t.Context()); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	if _, err := store.Get(t.Context(), "s1"); err != nil {
+		t.Errorf("Get after Unlock should succeed, got %v", err)
+	}
+}
+
+func TestLock_Renew(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	lock, err := store.Lock(t.Context(), "s1", 1100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	if err := lock.Renew(t.Context(), time.Minute); err != nil {
+		t.Fatalf("Renew: %v", err)
+	}
+
+	time.Sleep(1300 * time.Millisecond) // past the original short TTL
+
+	// Still locked — Renew should have extended it well past the original TTL.
+	if _, err := store.Get(t.Context(), "s1"); !errors.Is(err, hive.ErrKeyLocked) {
+		t.Errorf("Get after Renew: got %v, want ErrKeyLocked (lock should still be held)", err)
+	}
+	if err := lock.Unlock(t.Context()); err != nil {
+		t.Errorf("Unlock: %v", err)
+	}
+}
+
+func TestLock_UnlockWrongHolder_ReturnsErrLockNotHeld(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	lock, err := store.Lock(t.Context(), "s1", 1100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	time.Sleep(1300 * time.Millisecond) // let it expire
+
+	newLock, err := store.Lock(t.Context(), "s1", time.Minute)
+	if err != nil {
+		t.Fatalf("re-Lock after expiry: %v", err)
+	}
+
+	// The original (now-stale) handle must not be able to release the new holder's lock.
+	if err := lock.Unlock(t.Context()); !errors.Is(err, hive.ErrLockNotHeld) {
+		t.Errorf("stale Unlock: got %v, want ErrLockNotHeld", err)
+	}
+
+	if err := newLock.Unlock(t.Context()); err != nil {
+		t.Errorf("current holder's Unlock: %v", err)
+	}
+}
+
+func TestLock_AutoExpires(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	if _, err := store.Lock(t.Context(), "s1", 1100*time.Millisecond); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	time.Sleep(1300 * time.Millisecond)
+
+	if _, err := store.Lock(t.Context(), "s1", time.Minute); err != nil {
+		t.Errorf("Lock after expiry should succeed, got %v", err)
+	}
+}

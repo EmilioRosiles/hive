@@ -98,3 +98,9 @@ func (h *HashStore[T]) Expire(ctx context.Context, key string, ttl time.Duration
 	_, err := h.cluster.exec(ctx, transport.OpExpire, h.prefix+key, encodeTTL(ttl))
 	return err
 }
+
+// Lock acquires a distributed lock on key, valid for ttl. Returns ErrKeyLocked
+// if key is already locked.
+func (h *HashStore[T]) Lock(ctx context.Context, key string, ttl time.Duration) (*Lock, error) {
+	return newLock(ctx, h.cluster, h.prefix+key, ttl)
+}

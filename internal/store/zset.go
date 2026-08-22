@@ -44,13 +44,14 @@ type zsetNode struct {
 type ZSetStructure struct {
 	sizeBase
 	mtimeBase
+	lockBase
 	scores    map[string]float64 // O(1) lookup by member
 	head      *zsetNode          // sentinel; head.level grows lazily, never shrinks
 	tail      *zsetNode
 	length    int
-	level     int   // highest tower level currently in use
-	nodeBytes int64 // incrementally maintained byte cost of head + all nodes
-	expiresAt int64 // unix seconds, 0 = no expiry
+	level     int    // highest tower level currently in use
+	nodeBytes int64  // incrementally maintained byte cost of head + all nodes
+	expiresAt uint32 // unix seconds, 0 = no expiry
 }
 
 func NewZSetStructure() *ZSetStructure {
@@ -63,9 +64,9 @@ func NewZSetStructure() *ZSetStructure {
 	return z
 }
 
-func (z *ZSetStructure) Kind() Kind           { return KindZSet }
-func (z *ZSetStructure) KeyExpiry() int64     { return z.expiresAt }
-func (z *ZSetStructure) SetKeyExpiry(t int64) { z.expiresAt = t }
+func (z *ZSetStructure) Kind() Kind            { return KindZSet }
+func (z *ZSetStructure) KeyExpiry() uint32     { return z.expiresAt }
+func (z *ZSetStructure) SetKeyExpiry(t uint32) { z.expiresAt = t }
 
 // ByteSize is O(1): nodeBytes is maintained incrementally by insertNode/
 // deleteNode rather than recomputed by walking the skip list on every call
@@ -339,9 +340,11 @@ type wireZSetEntry struct {
 }
 
 type wireZSet struct {
-	Entries   []wireZSetEntry `msgpack:"e"`
-	ExpiresAt int64           `msgpack:"ea"`
-	MTime     uint32          `msgpack:"mt"`
+	Entries       []wireZSetEntry `msgpack:"e"`
+	ExpiresAt     uint32          `msgpack:"ea"`
+	MTime         uint32          `msgpack:"mt"`
+	LockToken     uint32          `msgpack:"lt"`
+	LockExpiresAt uint32          `msgpack:"le"`
 }
 
 func (z *ZSetStructure) Encode() ([]byte, error) {
@@ -349,7 +352,10 @@ func (z *ZSetStructure) Encode() ([]byte, error) {
 	for x := z.head.level[0].forward; x != nil; x = x.level[0].forward {
 		entries = append(entries, wireZSetEntry{Member: x.member, Score: x.score})
 	}
-	return msgpack.Marshal(wireZSet{Entries: entries, ExpiresAt: z.expiresAt, MTime: z.mtime})
+	return msgpack.Marshal(wireZSet{
+		Entries: entries, ExpiresAt: z.expiresAt, MTime: z.mtime,
+		LockToken: z.lockToken, LockExpiresAt: z.lockExpiresAt,
+	})
 }
 
 // bulkLoad builds the skip list from entries in one O(n) pass instead of n
@@ -403,6 +409,8 @@ func DecodeZSetStructure(data []byte) (*ZSetStructure, error) {
 	zs := NewZSetStructure()
 	zs.expiresAt = w.ExpiresAt
 	zs.mtime = w.MTime
+	zs.lockToken = w.LockToken
+	zs.lockExpiresAt = w.LockExpiresAt
 	zs.bulkLoad(w.Entries)
 	return zs, nil
 }

@@ -10,17 +10,18 @@ import (
 type HashStructure struct {
 	sizeBase
 	mtimeBase
+	lockBase
 	fields    map[string][]byte
-	expiresAt int64 // key-level expiry, unix seconds, 0 = no expiry
+	expiresAt uint32 // key-level expiry, unix seconds, 0 = no expiry
 }
 
 func NewHashStructure() *HashStructure {
 	return &HashStructure{fields: make(map[string][]byte)}
 }
 
-func (h *HashStructure) Kind() Kind           { return KindHash }
-func (h *HashStructure) KeyExpiry() int64     { return h.expiresAt }
-func (h *HashStructure) SetKeyExpiry(t int64) { h.expiresAt = t }
+func (h *HashStructure) Kind() Kind            { return KindHash }
+func (h *HashStructure) KeyExpiry() uint32     { return h.expiresAt }
+func (h *HashStructure) SetKeyExpiry(t uint32) { h.expiresAt = t }
 
 func (h *HashStructure) ByteSize() int64 {
 	var n int64
@@ -71,13 +72,18 @@ func (h *HashStructure) AppendAll(out [][]byte) [][]byte {
 // -- serialization for rebalance --
 
 type wireHash struct {
-	Fields    map[string][]byte `msgpack:"f"`
-	ExpiresAt int64             `msgpack:"e"`
-	MTime     uint32            `msgpack:"mt"`
+	Fields        map[string][]byte `msgpack:"f"`
+	ExpiresAt     uint32            `msgpack:"e"`
+	MTime         uint32            `msgpack:"mt"`
+	LockToken     uint32            `msgpack:"lt"`
+	LockExpiresAt uint32            `msgpack:"le"`
 }
 
 func (h *HashStructure) Encode() ([]byte, error) {
-	return msgpack.Marshal(wireHash{Fields: h.fields, ExpiresAt: h.expiresAt, MTime: h.mtime})
+	return msgpack.Marshal(wireHash{
+		Fields: h.fields, ExpiresAt: h.expiresAt, MTime: h.mtime,
+		LockToken: h.lockToken, LockExpiresAt: h.lockExpiresAt,
+	})
 }
 
 func DecodeHashStructure(data []byte) (*HashStructure, error) {
@@ -90,5 +96,7 @@ func DecodeHashStructure(data []byte) (*HashStructure, error) {
 	}
 	hs := &HashStructure{fields: w.Fields, expiresAt: w.ExpiresAt}
 	hs.mtime = w.MTime
+	hs.lockToken = w.LockToken
+	hs.lockExpiresAt = w.LockExpiresAt
 	return hs, nil
 }

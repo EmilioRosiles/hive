@@ -159,7 +159,7 @@ func TestReadCallsFnForExistingKey(t *testing.T) {
 	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("v"))
 	called := false
-	ds.Read("k", func(e DataStructure) { called = true })
+	ds.Read("k", func(e DataStructure) error { called = true; return nil })
 	if !called {
 		t.Error("Read: fn should be called for existing key")
 	}
@@ -167,7 +167,7 @@ func TestReadCallsFnForExistingKey(t *testing.T) {
 
 func TestReadSkipsMissingKey(t *testing.T) {
 	ds := NewDataStore(unlimited)
-	ds.Read("missing", func(DataStructure) { t.Error("Read: fn should not be called for missing key") })
+	ds.Read("missing", func(DataStructure) error { t.Error("Read: fn should not be called for missing key"); return nil })
 }
 
 func TestReadSkipsExpiredKey(t *testing.T) {
@@ -175,7 +175,7 @@ func TestReadSkipsExpiredKey(t *testing.T) {
 	e := NewValueStructureWithTTL([]byte("v"), 10*time.Millisecond)
 	mustSet(t, ds, "k", e)
 	time.Sleep(20 * time.Millisecond)
-	ds.Read("k", func(DataStructure) { t.Error("Read: fn should not be called for expired key") })
+	ds.Read("k", func(DataStructure) error { t.Error("Read: fn should not be called for expired key"); return nil })
 }
 
 // -- Apply --

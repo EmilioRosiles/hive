@@ -9,6 +9,9 @@ const (
 	// Shared ops — apply to any DataStructure kind.
 	OpDel    Op = 1
 	OpExpire Op = 2
+	OpLock   Op = 3
+	OpUnlock Op = 4
+	OpRenew  Op = 5
 
 	// Value ops.
 	OpValueSet Op = 10

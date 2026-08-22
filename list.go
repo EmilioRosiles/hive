@@ -123,3 +123,9 @@ func (l *ListStore[T]) Expire(ctx context.Context, key string, ttl time.Duration
 	_, err := l.cluster.exec(ctx, transport.OpExpire, l.prefix+key, encodeTTL(ttl))
 	return err
 }
+
+// Lock acquires a distributed lock on key, valid for ttl. Returns ErrKeyLocked
+// if key is already locked.
+func (l *ListStore[T]) Lock(ctx context.Context, key string, ttl time.Duration) (*Lock, error) {
+	return newLock(ctx, l.cluster, l.prefix+key, ttl)
+}
