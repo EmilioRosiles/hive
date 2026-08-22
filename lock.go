@@ -56,10 +56,11 @@ func (l *Lock) Renew(ctx context.Context, ttl time.Duration) error {
 	return err
 }
 
-// Context returns a context carrying this lock's fencing token — pass it to
+// Context returns ctx carrying this lock's fencing token — pass the result to
 // other store operations on the same key to perform them while held, in
-// place of ErrKeyLocked. Wrap it with context.WithTimeout/WithCancel for
-// your own deadline.
-func (l *Lock) Context() context.Context {
-	return cluster.WithLockToken(context.Background(), l.token)
+// place of ErrKeyLocked. Pass context.Background() for a critical section
+// that should run independently of any request that's already in flight, or
+// your own ctx to preserve its values/deadline/cancellation.
+func (l *Lock) Context(ctx context.Context) context.Context {
+	return cluster.WithLockToken(ctx, l.token)
 }

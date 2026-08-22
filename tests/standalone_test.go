@@ -297,7 +297,7 @@ func TestLock_ContextAuthorizesHolderOps(t *testing.T) {
 		t.Fatalf("Lock: %v", err)
 	}
 
-	authCtx := lock.Context()
+	authCtx := lock.Context(t.Context())
 	if err := store.Set(authCtx, "s1", Session{UserID: 1, Token: "in-critical-section"}); err != nil {
 		t.Fatalf("Set with lock.Context(): %v", err)
 	}

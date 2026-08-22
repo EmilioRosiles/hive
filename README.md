@@ -306,11 +306,11 @@ lock.Renew(ctx, 10*time.Second) // extend before it expires
 A lock is **blanket enforcement**: while held, every operation against that key — `Set`, `Get`, `Del`, and so on — is rejected with `ErrKeyLocked` for everyone, including the holder. To perform the work the lock is protecting, authorize the call with the lock's own context:
 
 ```go
-sessions.Set(lock.Context(), "user:123", updated) // authorized: same holder, passes
-sessions.Set(ctx, "user:123", updated)             // rejected: ErrKeyLocked
+sessions.Set(lock.Context(ctx), "user:123", updated) // authorized: same holder, passes
+sessions.Set(ctx, "user:123", updated)               // rejected: ErrKeyLocked
 ```
 
-`lock.Context()` is rooted on `context.Background()` and carries the lock's token, not any deadline — combine it with your own timeout via `context.WithTimeout` if you need one. `Unlock`/`Renew` verify the caller still holds the lock (via that same token) and return `ErrLockNotHeld` otherwise — either it was never held, or it expired and was re-acquired by someone else. Locks expire automatically if never renewed or unlocked, so a crashed holder can't strand a key forever.
+`lock.Context(ctx)` carries the lock's token on top of whatever you pass in — pass your own in-flight `ctx` to preserve its values/deadline/cancellation, or `context.Background()` for a critical section that should run independently of any request already in flight. `Unlock`/`Renew` verify the caller still holds the lock (via that same token) and return `ErrLockNotHeld` otherwise — either it was never held, or it expired and was re-acquired by someone else. Locks expire automatically if never renewed or unlocked, so a crashed holder can't strand a key forever.
 
 ## Configuration
 

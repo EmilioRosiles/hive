@@ -38,7 +38,7 @@ func TestCluster_Lock_WorksAcrossForwarding(t *testing.T) {
 
 	// With lock.Context(), the token must ride the forward request and be
 	// honored by the remote primary.
-	authCtx := lock.Context()
+	authCtx := lock.Context(t.Context())
 	if err := store.Set(authCtx, "alice", Session{UserID: 1, Token: "ok"}); err != nil {
 		t.Fatalf("forwarded authorized Set: %v", err)
 	}
