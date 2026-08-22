@@ -198,21 +198,17 @@ func (ds *DataStore) getShard(key string) *shard {
 	return ds.shards[h&(ds.shardsCount-1)]
 }
 
-// removeEntry removes key from s given its already-looked-up entry e (which
-// must be non-nil), decrementing the global used counter. Taking e as a
-// parameter rather than looking it up again saves a second map access at
-// every call site, all of which already have it in hand.
-// Must be called with s's write lock held.
+// removeEntry removes key from s given its already-looked-up entry e (must
+// be non-nil), decrementing the global used counter. Must be called with
+// s's write lock held.
 func (ds *DataStore) removeEntry(s *shard, key string, e DataStructure) {
 	ds.used.Add(-e.cachedSize())
 	delete(s.data, key)
 }
 
 // upsertEntry inserts or replaces key in s given its already-looked-up old
-// value (existing, exists — the zero value/false if key is new), updating
-// the global used counter. Returns ErrCapacityExceeded if the write would
-// push used above capacity. Overwrites that reduce or maintain entry size
-// always succeed. Must be called with s's write lock held.
+// value (existing, exists), updating the global used counter. Returns
+// ErrCapacityExceeded if over capacity. Must be called with s's write lock held.
 func (ds *DataStore) upsertEntry(s *shard, key string, e DataStructure, existing DataStructure, exists bool) error {
 	size := int64(len(key)) + e.ByteSize() + entryOverhead
 

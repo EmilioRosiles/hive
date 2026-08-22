@@ -157,3 +157,40 @@ func BenchmarkCluster_ForwardedGet(b *testing.B) {
 		})
 	})
 }
+
+// BenchmarkCluster_ForwardedLock measures a full Lock+Unlock round trip when
+// every op must be routed cross-node — see benchForwardingCluster. Each call
+// uses a fresh key so it never contends with a prior or concurrent one.
+func BenchmarkCluster_ForwardedLock(b *testing.B) {
+	cache := benchForwardingCluster(b)
+	store := hive.NewValueStore[Session](cache, "bench")
+
+	b.Run("SingleThreaded", func(b *testing.B) {
+		b.ResetTimer()
+		for i := range b.N {
+			lock, err := store.Lock(b.Context(), fmt.Sprintf("lock-%d", i), time.Minute)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := lock.Unlock(b.Context()); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("Concurrent", func(b *testing.B) {
+		var counter atomic.Uint64
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				n := counter.Add(1)
+				lock, err := store.Lock(b.Context(), fmt.Sprintf("lock-%d", n), time.Minute)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if err := lock.Unlock(b.Context()); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	})
+}

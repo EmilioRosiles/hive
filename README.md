@@ -14,8 +14,8 @@ defer node.Shutdown()
 cluster := node.Cluster()
 sessions := hive.NewValueStore[Session](cluster, "sessions")
 
-sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
-s, err := sessions.Get("user:123")
+sessions.Set(ctx, "user:123", Session{UserID: 123, Token: "abc"})
+s, err := sessions.Get(ctx, "user:123")
 ```
 
 ## How it works
@@ -48,9 +48,9 @@ defer node.Shutdown()
 
 cluster := node.Cluster()
 counters := hive.NewValueStore[int](cluster, "counters")
-counters.Set("visits", 42)
+counters.Set(ctx, "visits", 42)
 
-v, err := counters.Get("visits")
+v, err := counters.Get(ctx, "visits")
 ```
 
 ### Cluster mode
@@ -136,51 +136,48 @@ type Session struct {
 sessions := hive.NewValueStore[Session](cluster, "sessions")
 
 // Set stores a value.
-err := sessions.Set("user:123", Session{UserID: 123, Token: "abc"})
+err := sessions.Set(ctx, "user:123", Session{UserID: 123, Token: "abc"})
 
 // Get retrieves and decodes a value. Errors if missing or expired.
-s, err := sessions.Get("user:123")
+s, err := sessions.Get(ctx, "user:123")
 
 // Del removes a key.
-sessions.Del("user:123")
+sessions.Del(ctx, "user:123")
 
 // Expire sets a TTL. The key is deleted automatically after the duration elapses.
-sessions.Expire("user:123", 30*time.Minute)
+sessions.Expire(ctx, "user:123", 30*time.Minute)
 ```
 
 ### SetStore
 
-A distributed string set. Members can carry independent per-member TTLs, making it useful for tracking presence or short-lived memberships.
+A distributed string set, useful for tracking presence or membership.
 
 ```go
 online := hive.NewSetStore(cluster, "online_users")
 
 // SAdd adds a member to the set at key.
-online.SAdd("room:1", "user:123")
+online.SAdd(ctx, "room:1", "user:123")
 
-// SExpireMember sets a per-member TTL. Other members and the key are unaffected.
-online.SExpireMember("room:1", "user:123", 30*time.Second)
-
-// SMembers returns all live members.
-members, err := online.SMembers("room:1")
+// SMembers returns all members.
+members, err := online.SMembers(ctx, "room:1")
 
 // SIsMember checks membership.
-ok, err := online.SIsMember("room:1", "user:123")
+ok, err := online.SIsMember(ctx, "room:1", "user:123")
 
-// SCard returns the number of live members.
-n, err := online.SCard("room:1")
+// SCard returns the number of members.
+n, err := online.SCard(ctx, "room:1")
 
 // SRem removes a single member.
-online.SRem("room:1", "user:123")
+online.SRem(ctx, "room:1", "user:123")
 
 // Del removes the entire set. Expire sets a key-level TTL.
-online.Del("room:1")
-online.Expire("room:1", 5*time.Minute)
+online.Del(ctx, "room:1")
+online.Expire(ctx, "room:1", 5*time.Minute)
 ```
 
 ### HashStore[T]
 
-A typed key/field/value store. Fields within a key carry independent TTLs, making it well-suited for tracking per-entity state with automatic eviction.
+A typed key/field/value store, well-suited for tracking per-entity state.
 
 ```go
 type Stream struct {
@@ -191,26 +188,23 @@ type Stream struct {
 streams := hive.NewHashStore[Stream](cluster, "streams")
 
 // HSet stores a value under key/field.
-streams.HSet("user:123", "stream:abc", Stream{StartedAt: time.Now()})
-
-// HExpireField sets a TTL on a single field. Other fields are unaffected.
-streams.HExpireField("user:123", "stream:abc", 30*time.Minute)
+streams.HSet(ctx, "user:123", "stream:abc", Stream{StartedAt: time.Now()})
 
 // HGet retrieves and decodes a single field.
-s, err := streams.HGet("user:123", "stream:abc")
+s, err := streams.HGet(ctx, "user:123", "stream:abc")
 
-// HGetAll retrieves all live fields under a key.
-all, err := streams.HGetAll("user:123")
+// HGetAll retrieves all fields under a key.
+all, err := streams.HGetAll(ctx, "user:123")
 
-// HKeys returns the names of all live fields.
-fields, err := streams.HKeys("user:123")
+// HKeys returns the names of all fields.
+fields, err := streams.HKeys(ctx, "user:123")
 
 // HDel removes a single field.
-streams.HDel("user:123", "stream:abc")
+streams.HDel(ctx, "user:123", "stream:abc")
 
 // Del removes the entire hash. Expire sets a key-level TTL.
-streams.Del("user:123")
-streams.Expire("user:123", 1*time.Hour)
+streams.Del(ctx, "user:123")
+streams.Expire(ctx, "user:123", 1*time.Hour)
 ```
 
 ### ListStore[T]
@@ -226,27 +220,27 @@ type Task struct {
 queue := hive.NewListStore[Task](cluster, "work_queue")
 
 // RPush appends to the tail. LPush prepends to the head.
-queue.RPush("jobs", Task{ID: "t1", Payload: data})
-queue.LPush("jobs", Task{ID: "t0", Payload: data})
+queue.RPush(ctx, "jobs", Task{ID: "t1", Payload: data})
+queue.LPush(ctx, "jobs", Task{ID: "t0", Payload: data})
 
 // LPop removes and returns the head. RPop removes and returns the tail.
-task, err := queue.LPop("jobs")
+task, err := queue.LPop(ctx, "jobs")
 
 // LLen returns the number of elements.
-n, err := queue.LLen("jobs")
+n, err := queue.LLen(ctx, "jobs")
 
 // LIndex returns the element at index. Negative indices count from the tail.
-last, err := queue.LIndex("jobs", -1)
+last, err := queue.LIndex(ctx, "jobs", -1)
 
 // LRange returns a slice from start to stop inclusive. Negative indices supported.
-page, err := queue.LRange("jobs", 0, 9)
+page, err := queue.LRange(ctx, "jobs", 0, 9)
 
 // LSet overwrites the element at index.
-queue.LSet("jobs", 0, Task{ID: "t0-updated"})
+queue.LSet(ctx, "jobs", 0, Task{ID: "t0-updated"})
 
 // Del removes the entire list. Expire sets a key-level TTL.
-queue.Del("jobs")
-queue.Expire("jobs", 1*time.Hour)
+queue.Del(ctx, "jobs")
+queue.Expire(ctx, "jobs", 1*time.Hour)
 ```
 
 ### ZSetStore
@@ -257,43 +251,66 @@ A distributed sorted set. Each member is a unique string associated with a float
 scores := hive.NewZSetStore(cluster, "leaderboard")
 
 // ZAdd inserts or updates member with score.
-scores.ZAdd("game:1", 9500.0, "alice")
-scores.ZAdd("game:1", 8200.0, "bob")
+scores.ZAdd(ctx, "game:1", 9500.0, "alice")
+scores.ZAdd(ctx, "game:1", 8200.0, "bob")
 
 // ZScore returns the score for a member. Errors if member does not exist.
-s, err := scores.ZScore("game:1", "alice")
+s, err := scores.ZScore(ctx, "game:1", "alice")
 
 // ZRank returns the 0-based rank in ascending order (lowest score = 0).
 // ZRevRank returns the rank in descending order (highest score = 0).
-rank, err := scores.ZRank("game:1", "bob")
-rank, err  = scores.ZRevRank("game:1", "alice")
+rank, err := scores.ZRank(ctx, "game:1", "bob")
+rank, err  = scores.ZRevRank(ctx, "game:1", "alice")
 
 // ZCard returns the number of members.
-n, err := scores.ZCard("game:1")
+n, err := scores.ZCard(ctx, "game:1")
 
 // ZRange returns members from rank start to stop inclusive.
 // Negative indices count from the top (highest rank).
-top3, err := scores.ZRange("game:1", -3, -1)
+top3, err := scores.ZRange(ctx, "game:1", -3, -1)
 
 // ZRangeByScore returns all members with min <= score <= max in ascending order.
-mid, err := scores.ZRangeByScore("game:1", 8000.0, 9000.0)
+mid, err := scores.ZRangeByScore(ctx, "game:1", 8000.0, 9000.0)
 
 // ZRem removes a member.
-scores.ZRem("game:1", "bob")
+scores.ZRem(ctx, "game:1", "bob")
 
 // Del removes the entire sorted set. Expire sets a key-level TTL.
-scores.Del("game:1")
-scores.Expire("game:1", 24*time.Hour)
+scores.Del(ctx, "game:1")
+scores.Expire(ctx, "game:1", 24*time.Hour)
 ```
 
 `ZRange` and `ZRangeByScore` return `[]ZSetEntry`, where each entry has `Member string` and `Score float64`.
 
 ## TTL behavior
 
-All stores support two levels of TTL:
+`Expire` sets a key-level TTL; the entire key is deleted once it elapses.
 
-- **Key-level TTL** (`Expire`) — deletes the entire key when it elapses
-- **Field-level TTL** (`SExpireMember`, `HExpireField`) — evicts a single member or field independently, without affecting other members or the key itself. If all members/fields expire, the key is cleaned up automatically.
+## Locking
+
+`Lock` acquires a non-blocking, cluster-wide distributed lock on a key, returning `ErrKeyLocked` immediately if it's already held. Every store type exposes it:
+
+```go
+lock, err := sessions.Lock(ctx, "user:123", 10*time.Second)
+if err != nil {
+    // ErrKeyLocked: someone else holds it
+    return err
+}
+defer lock.Unlock(ctx)
+
+// ... critical section ...
+
+lock.Renew(ctx, 10*time.Second) // extend before it expires
+```
+
+A lock is **blanket enforcement**: while held, every operation against that key — `Set`, `Get`, `Del`, and so on — is rejected with `ErrKeyLocked` for everyone, including the holder. To perform the work the lock is protecting, authorize the call with the lock's own context:
+
+```go
+sessions.Set(lock.Context(), "user:123", updated) // authorized: same holder, passes
+sessions.Set(ctx, "user:123", updated)             // rejected: ErrKeyLocked
+```
+
+`lock.Context()` is rooted on `context.Background()` and carries the lock's token, not any deadline — combine it with your own timeout via `context.WithTimeout` if you need one. `Unlock`/`Renew` verify the caller still holds the lock (via that same token) and return `ErrLockNotHeld` otherwise — either it was never held, or it expired and was re-acquired by someone else. Locks expire automatically if never renewed or unlocked, so a crashed holder can't strand a key forever.
 
 ## Configuration
 
@@ -410,17 +427,34 @@ This makes Hive well-suited for session caches, rate-limit counters, presence tr
 
 ## Performance
 
-Single-machine micro-benchmarks, AMD Ryzen 5 5600X (6 cores / 12 threads). A snapshot of specific, narrow dimensions, not a general performance claim. Standalone (see [Standalone](#standalone-single-instance)) is a same-process call, no network. Cluster mode is measured across a real network hop: a 3-node cluster (RF=2) where the benchmark driver only ever talks to a node configured with `MemLimit: hive.Bytes(0)` (see [Configuration](#configuration)) — a node that owns no keyspace of its own, so every operation is forwarded to whichever of the other two nodes actually owns the key. Throughput is the reciprocal of latency (`1s / ns per op`); for the concurrent rows that's aggregate ops/sec across all 12 goroutines, not per-goroutine. Cluster mode numbers use the default `ConnPoolSize: 4`, measured in a resource-pinned container (`--cpus=12 --memory=4g`) for a cleaner, repeatable result.
+Measured with a real multi-container cluster, not goroutines sharing one process: four Docker containers (three data-owning nodes plus a driver), each pinned to `cpus: 3` / `mem_limit: 1g` (12 CPUs / 4GB total budget). A snapshot of specific, narrow dimensions, not a general performance claim.
+
+Standalone numbers come from the same driver container running a single unclustered node (see [Standalone](#standalone-single-instance)) — a same-process call, no network. Cluster numbers come from that driver joining a 3-node cluster (RF=2) as a node configured with `MemLimit: hive.Bytes(0)` (see [Configuration](#configuration)) — it owns no keyspace, so every operation is forwarded over the network to whichever of the other three nodes actually owns the key. Both modes run inside the same 3-CPU driver container, so the delta between them isolates network/forwarding cost rather than compute budget. Concurrent rows use 8 goroutines; throughput is aggregate ops/sec across all of them, not per-goroutine. LOCK rows measure a full `Lock`+`Unlock` round trip (two ops), each call using a fresh key so it never contends with another.
 
 | Metric | Standalone | Cluster mode (cross-node) |
 |---|---|---|
-| SET, single-threaded | ~593 ns/op (~1.69M ops/sec) | ~44 μs/op (~23.0K ops/sec) |
-| GET, single-threaded | ~539 ns/op (~1.86M ops/sec) | ~31 μs/op (~32.5K ops/sec) |
-| SET, 12-way concurrent | ~155 ns/op (~6.45M ops/sec) | ~3.8 μs/op (~266.6K ops/sec) |
-| GET, 12-way concurrent | ~127 ns/op (~7.87M ops/sec) | ~3.2 μs/op (~313.6K ops/sec) |
-| Idle memory footprint | ~118–120 KB heap | ~450–550 KB heap (3-node formed cluster, per node) |
+| SET, single-threaded | ~779 ns/op (~1.28M ops/sec) | ~52 μs/op (~19.2K ops/sec) |
+| GET, single-threaded | ~737 ns/op (~1.36M ops/sec) | ~51 μs/op (~19.8K ops/sec) |
+| LOCK+UNLOCK, single-threaded | ~930 ns/op (~1.08M ops/sec) | ~101 μs/op (~9.9K ops/sec) |
+| SET, 8-way concurrent | ~2.99M ops/sec | ~87.5K ops/sec |
+| GET, 8-way concurrent | ~3.40M ops/sec | ~112.0K ops/sec |
+| LOCK+UNLOCK, 8-way concurrent | ~2.45M ops/sec | ~45.9K ops/sec |
 
-Idle memory is the incremental heap added to the host process (`runtime.MemStats`, GC-settled), measured after construction. A lone node with no peers yet sits at ~120–123 KB, the same order as standalone. Each known peer's ring slot, connection pool, and gossip state accounts for the rest — plus a replication queue per peer if `ReplicationFactor > 1`, which is otherwise skipped entirely.
+LOCK's cost lines up with SET/GET as expected — a round trip of two ops costs almost exactly 2× one op, both standalone and cross-node.
+
+Two different memory numbers, since they answer different questions:
+
+- **Node construction cost** — incremental `HeapAlloc` added by `hive.NewNode()` itself (GC-settled heap immediately before vs. after), isolating just what Hive's own state costs, independent of Go runtime/binary baseline.
+- **Process RSS** — the whole container's resident memory (`/proc/self/status` VmRSS): Go runtime, goroutine stacks, GC metadata, loaded binary, everything. This is what actually shows up in `docker stats`, but it's dominated by fixed Go-process overhead (several MB at rest for *any* Go binary), not something `NewNode` controls.
+
+| Metric | Standalone | Cluster mode (relay/driver) |
+|---|---|---|
+| Node construction (`HeapAlloc` delta) | ~112 KB | ~859 KB |
+| RSS, idle (no data) | ~9.3 MB | ~11.9 MB |
+| RSS, after 1,000 keys | ~9.5 MB (+133 B/key logical) | ~14.1 MB |
+| RSS, after full run above (~100K keys) | ~37.3 MB | ~13.7 MB |
+
+The relay's own logical accounting (`node.MemUsed()`) stays at exactly 0 through every RSS row above — it never owns a key, so its RSS reflects only connection/gossip/forwarding state, not the data volume flowing through it; standalone's RSS instead grows with what it actually stores, from ~9.3 MB idle to ~37.3 MB holding ~100K small entries.
 
 ## Data types
 

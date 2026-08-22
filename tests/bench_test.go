@@ -2,6 +2,7 @@ package tests
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +34,36 @@ func BenchmarkValueStore_Get(b *testing.B) {
 	}
 }
 
+func BenchmarkValueStore_Set_Parallel(b *testing.B) {
+	cache := benchStandalone(b)
+	store := hive.NewValueStore[Session](cache, "sessions")
+	v := Session{UserID: 1, Token: "bench-token"}
+	var counter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			n := counter.Add(1)
+			store.Set(b.Context(), fmt.Sprintf("key-%d", n%1000), v)
+		}
+	})
+}
+
+func BenchmarkValueStore_Get_Parallel(b *testing.B) {
+	cache := benchStandalone(b)
+	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(b.Context(), "key", Session{UserID: 1, Token: "bench-token"})
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			store.Get(b.Context(), "key")
+		}
+	})
+}
+
+// BenchmarkValueStore_SetGet_Parallel measures a 50/50 mixed read/write
+// workload, unlike the pure Set/Get_Parallel benchmarks above.
 func BenchmarkValueStore_SetGet_Parallel(b *testing.B) {
 	cache := benchStandalone(b)
 	store := hive.NewValueStore[Session](cache, "sessions")
@@ -113,6 +144,47 @@ func BenchmarkHashStore_HGetAll_10Fields(b *testing.B) {
 	for b.Loop() {
 		store.HGetAll(b.Context(), "user:1")
 	}
+}
+
+// -- Lock --
+
+// BenchmarkValueStore_Lock measures the cost of a full Lock+Unlock round
+// trip. Each iteration uses a fresh key so calls never contend with each
+// other — this measures the mechanism's own overhead, not lock contention.
+func BenchmarkValueStore_Lock(b *testing.B) {
+	cache := benchStandalone(b)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	b.ResetTimer()
+	for i := range b.N {
+		lock, err := store.Lock(b.Context(), fmt.Sprintf("lock-%d", i), time.Minute)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := lock.Unlock(b.Context()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkValueStore_Lock_Parallel(b *testing.B) {
+	cache := benchStandalone(b)
+	store := hive.NewValueStore[Session](cache, "sessions")
+	var counter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			n := counter.Add(1)
+			lock, err := store.Lock(b.Context(), fmt.Sprintf("lock-%d", n), time.Minute)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := lock.Unlock(b.Context()); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 // -- value sizes --

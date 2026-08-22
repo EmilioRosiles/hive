@@ -44,10 +44,8 @@ func entrySize(key, v string) int64 {
 
 // -- struct layout --
 
-// TestStructSizes_NoAccidentalPadding guards the field ordering in each
-// DataStructure type: a careless field insertion in the middle of one of
-// these structs silently reintroduces 8 bytes of alignment padding per
-// entry. See the field-order comment on each type.
+// TestStructSizes_NoAccidentalPadding catches a field insertion that
+// reintroduces alignment padding into any DataStructure type.
 func TestStructSizes_NoAccidentalPadding(t *testing.T) {
 	cases := []struct {
 		name string
