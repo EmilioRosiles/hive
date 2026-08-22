@@ -25,23 +25,23 @@ func TestCluster_ZeroOwnershipWorker_RoutesWithoutStoringLocally(t *testing.T) {
 
 	// Write via a real storage node, read via the zero-ownership worker —
 	// must be forwarded correctly since n3 owns nothing.
-	if err := store1.Set("alice", Session{UserID: 1, Token: "alice"}); err != nil {
+	if err := store1.Set(t.Context(), "alice", Session{UserID: 1, Token: "alice"}); err != nil {
 		t.Fatalf("Set via n1: %v", err)
 	}
 	waitFor(t, time.Second, "read via worker forwards correctly", func() bool {
-		got, err := store3.Get("alice")
+		got, err := store3.Get(t.Context(), "alice")
 		return err == nil && got.Token == "alice"
 	})
 
 	// Write via the zero-ownership worker itself — must forward to whichever
 	// real node should own the key, not fail or store locally.
-	if err := store3.Set("bob", Session{UserID: 2, Token: "bob"}); err != nil {
+	if err := store3.Set(t.Context(), "bob", Session{UserID: 2, Token: "bob"}); err != nil {
 		t.Fatalf("Set via worker n3: %v", err)
 	}
 	store2 := hive.NewValueStore[Session](c2, "sessions")
 	waitFor(t, time.Second, "write via worker lands on a real owner", func() bool {
-		got1, err1 := store1.Get("bob")
-		got2, err2 := store2.Get("bob")
+		got1, err1 := store1.Get(t.Context(), "bob")
+		got2, err2 := store2.Get(t.Context(), "bob")
 		return (err1 == nil && got1.Token == "bob") || (err2 == nil && got2.Token == "bob")
 	})
 }

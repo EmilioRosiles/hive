@@ -1,6 +1,7 @@
 package hive
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -24,20 +25,20 @@ func NewValueStore[T any](cluster *Cluster, name string) *ValueStore[T] {
 }
 
 // Set encodes value using msgpack and stores it under key.
-func (s *ValueStore[T]) Set(key string, value T) error {
+func (s *ValueStore[T]) Set(ctx context.Context, key string, value T) error {
 	data, err := encode(value)
 	if err != nil {
 		return fmt.Errorf("hive: %s.Set %q: %w", s.prefix, key, err)
 	}
-	_, err = s.cluster.exec(transport.OpValueSet, s.prefix+key, data)
+	_, err = s.cluster.exec(ctx, transport.OpValueSet, s.prefix+key, data)
 	return err
 }
 
 // Get retrieves and decodes the value stored under key.
 // Returns an error if the key does not exist or has expired.
-func (s *ValueStore[T]) Get(key string) (T, error) {
+func (s *ValueStore[T]) Get(ctx context.Context, key string) (T, error) {
 	var zero T
-	results, err := s.cluster.exec(transport.OpValueGet, s.prefix+key)
+	results, err := s.cluster.exec(ctx, transport.OpValueGet, s.prefix+key)
 	if err != nil {
 		return zero, fmt.Errorf("hive: %s.Get %q: %w", s.prefix, key, err)
 	}
@@ -49,13 +50,13 @@ func (s *ValueStore[T]) Get(key string) (T, error) {
 }
 
 // Del removes key from the store.
-func (s *ValueStore[T]) Del(key string) error {
-	_, err := s.cluster.exec(transport.OpDel, s.prefix+key)
+func (s *ValueStore[T]) Del(ctx context.Context, key string) error {
+	_, err := s.cluster.exec(ctx, transport.OpDel, s.prefix+key)
 	return err
 }
 
 // Expire sets a TTL on key. The entry is deleted automatically after ttl elapses.
-func (s *ValueStore[T]) Expire(key string, ttl time.Duration) error {
-	_, err := s.cluster.exec(transport.OpExpire, s.prefix+key, encodeTTL(ttl))
+func (s *ValueStore[T]) Expire(ctx context.Context, key string, ttl time.Duration) error {
+	_, err := s.cluster.exec(ctx, transport.OpExpire, s.prefix+key, encodeTTL(ttl))
 	return err
 }

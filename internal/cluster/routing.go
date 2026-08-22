@@ -77,7 +77,7 @@ func (m *Cluster) handleForwardBatch(payload []byte) error {
 //   - ScopeWrite: sync write to primary (exec locally if we are primary, forward otherwise),
 //     then queue replication to replicas (nodes[1:]).
 //   - ScopeLocal: always execute on this node regardless of ring ownership.
-func (m *Cluster) dispatch(op transport.Op, key string, args ...[]byte) ([][]byte, error) {
+func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, args ...[]byte) ([][]byte, error) {
 	def, ok := opRegistry[op]
 	if !ok {
 		return nil, fmt.Errorf("cluster: unknown op %d", op)
@@ -87,10 +87,10 @@ func (m *Cluster) dispatch(op transport.Op, key string, args ...[]byte) ([][]byt
 
 	switch def.Scope {
 	case ScopeRead:
-		return m.execOrForward(def, op, key, args, nodes)
+		return m.execOrForward(ctx, def, op, key, args, nodes)
 
 	case ScopeWrite:
-		result, err := m.execOrForward(def, op, key, args, nodes)
+		result, err := m.execOrForward(ctx, def, op, key, args, nodes)
 		if err != nil {
 			return nil, err
 		}
@@ -108,11 +108,11 @@ func (m *Cluster) dispatch(op transport.Op, key string, args ...[]byte) ([][]byt
 // execOrForward runs op locally if this node is the primary owner for key (or
 // there is no other node), otherwise forwards it to the primary and returns
 // its response.
-func (m *Cluster) execOrForward(def opDef, op transport.Op, key string, args [][]byte, nodes []string) ([][]byte, error) {
+func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op, key string, args [][]byte, nodes []string) ([][]byte, error) {
 	if len(nodes) == 0 || m.cfg.NodeID == nodes[0] {
 		return def.Exec(m, key, args)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RoutingTimeout)
+	ctx, cancel := context.WithTimeout(ctx, m.cfg.RoutingTimeout)
 	defer cancel()
 	resp, err := m.sendForward(ctx, nodes[0], transport.ForwardRequest{Op: op, Key: key, Args: args})
 	if err != nil {
@@ -179,6 +179,6 @@ func (m *Cluster) sendForwardBatch(ctx context.Context, nodeID string, batch []t
 
 // Exec is the exported entry point for store files to run a cluster op.
 // It delegates to dispatch, keeping routing logic internal to this package.
-func (m *Cluster) Exec(op transport.Op, key string, args ...[]byte) ([][]byte, error) {
-	return m.dispatch(op, key, args...)
+func (m *Cluster) Exec(ctx context.Context, op transport.Op, key string, args ...[]byte) ([][]byte, error) {
+	return m.dispatch(ctx, op, key, args...)
 }

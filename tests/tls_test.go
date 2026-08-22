@@ -28,7 +28,7 @@ func TestCluster_TLS_FormsAndReplicates(t *testing.T) {
 	})
 
 	store1 := hive.NewValueStore[Session](c1, "sessions")
-	if err := store1.Set("alice", Session{UserID: 1, Token: "alice"}); err != nil {
+	if err := store1.Set(t.Context(), "alice", Session{UserID: 1, Token: "alice"}); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 
@@ -37,8 +37,8 @@ func TestCluster_TLS_FormsAndReplicates(t *testing.T) {
 	store2 := hive.NewValueStore[Session](c2, "sessions")
 	store3 := hive.NewValueStore[Session](c3, "sessions")
 	waitFor(t, 2*time.Second, "write replicated over TLS", func() bool {
-		got2, err2 := store2.Get("alice")
-		got3, err3 := store3.Get("alice")
+		got2, err2 := store2.Get(t.Context(), "alice")
+		got3, err3 := store3.Get(t.Context(), "alice")
 		return (err2 == nil && got2.Token == "alice") || (err3 == nil && got3.Token == "alice")
 	})
 }

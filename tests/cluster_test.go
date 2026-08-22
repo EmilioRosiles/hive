@@ -35,7 +35,7 @@ func TestCluster_ReadFromAnyNode(t *testing.T) {
 	store3 := hive.NewValueStore[Session](c3, "sessions")
 
 	for i, k := range keys {
-		if err := store1.Set(k, Session{UserID: i, Token: k}); err != nil {
+		if err := store1.Set(t.Context(), k, Session{UserID: i, Token: k}); err != nil {
 			t.Fatalf("Set %q: %v", k, err)
 		}
 	}
@@ -43,7 +43,7 @@ func TestCluster_ReadFromAnyNode(t *testing.T) {
 	// Every key must be readable from all three nodes via forwarding.
 	for _, k := range keys {
 		for i, s := range []*hive.ValueStore[Session]{store1, store2, store3} {
-			got, err := s.Get(k)
+			got, err := s.Get(t.Context(), k)
 			if err != nil {
 				t.Errorf("node %d Get %q: %v", i+1, k, err)
 				continue
@@ -66,11 +66,11 @@ func TestCluster_SetStoreAcrossNodes(t *testing.T) {
 	online1 := hive.NewSetStore(c1, "online")
 	online2 := hive.NewSetStore(c2, "online")
 
-	online1.SAdd("room:1", "user:1")
-	online1.SAdd("room:1", "user:2")
+	online1.SAdd(t.Context(), "room:1", "user:1")
+	online1.SAdd(t.Context(), "room:1", "user:2")
 
 	// Read back from node 2 (may forward).
-	members, err := online2.SMembers("room:1")
+	members, err := online2.SMembers(t.Context(), "room:1")
 	if err != nil {
 		t.Fatalf("SMembers from node2: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestCluster_RebalanceOnJoin_ValueIntegrity(t *testing.T) {
 	keys := make([]string, nkeys)
 	for i := range keys {
 		keys[i] = fmt.Sprintf("key-%d", i)
-		if err := store1.Set(keys[i], Session{UserID: i, Token: keys[i]}); err != nil {
+		if err := store1.Set(t.Context(), keys[i], Session{UserID: i, Token: keys[i]}); err != nil {
 			t.Fatalf("Set %q: %v", keys[i], err)
 		}
 	}
@@ -114,7 +114,7 @@ func TestCluster_RebalanceOnJoin_ValueIntegrity(t *testing.T) {
 	}
 	for i, k := range keys {
 		for node, s := range stores {
-			got, err := s.Get(k)
+			got, err := s.Get(t.Context(), k)
 			if err != nil {
 				t.Errorf("node %d Get %q: %v", node+1, k, err)
 				continue
@@ -143,7 +143,7 @@ func TestCluster_NodeLeave_RF2(t *testing.T) {
 	keys := make([]string, nkeys)
 	for i := range keys {
 		keys[i] = fmt.Sprintf("leave-%d", i)
-		if err := s1.Set(keys[i], Session{UserID: i, Token: keys[i]}); err != nil {
+		if err := s1.Set(t.Context(), keys[i], Session{UserID: i, Token: keys[i]}); err != nil {
 			t.Fatalf("Set %q: %v", keys[i], err)
 		}
 	}
@@ -168,7 +168,7 @@ func TestCluster_NodeLeave_RF2(t *testing.T) {
 	}
 	for i, k := range keys {
 		for _, sv := range survivors {
-			got, err := sv.store.Get(k)
+			got, err := sv.store.Get(t.Context(), k)
 			if err != nil {
 				t.Errorf("after n1 leave, %s Get %q: %v", sv.name, k, err)
 				continue
@@ -197,7 +197,7 @@ func TestCluster_SequentialLeaves_DataSurvives(t *testing.T) {
 	keys := make([]string, nkeys)
 	for i := range keys {
 		keys[i] = fmt.Sprintf("seq-%d", i)
-		if err := s1.Set(keys[i], Session{UserID: i, Token: keys[i]}); err != nil {
+		if err := s1.Set(t.Context(), keys[i], Session{UserID: i, Token: keys[i]}); err != nil {
 			t.Fatalf("Set %q: %v", keys[i], err)
 		}
 	}
@@ -220,7 +220,7 @@ func TestCluster_SequentialLeaves_DataSurvives(t *testing.T) {
 
 	// n1 alone must have all keys.
 	for i, k := range keys {
-		got, err := s1.Get(k)
+		got, err := s1.Get(t.Context(), k)
 		if err != nil {
 			t.Errorf("after n2+n3 leave, Get %q: %v", k, err)
 			continue
@@ -245,7 +245,7 @@ func TestCluster_ReplicationFactor2(t *testing.T) {
 	store := hive.NewValueStore[Session](c1, "sessions")
 	keys := []string{"r1", "r2", "r3", "r4"}
 	for i, k := range keys {
-		store.Set(k, Session{UserID: i})
+		store.Set(t.Context(), k, Session{UserID: i})
 	}
 
 	// With RF=2 each key should be readable from every node.
@@ -257,7 +257,7 @@ func TestCluster_ReplicationFactor2(t *testing.T) {
 	waitFor(t, 1*time.Second, "all keys replicated", func() bool {
 		for _, s := range stores {
 			for _, k := range keys {
-				if _, err := s.Get(k); err != nil {
+				if _, err := s.Get(t.Context(), k); err != nil {
 					return false
 				}
 			}
