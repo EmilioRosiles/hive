@@ -7,12 +7,15 @@ import (
 // HashStructure is a map of string fields to byte-slice values. There is no
 // per-field TTL — only a key-level expiry applies.
 // The shard lock in DataStore protects all field access — no internal lock needed.
+// Field order matters here: grouping the 4-byte fields (mtimeBase, expiresAt,
+// lockBase) after fields avoids padding Go would otherwise insert around the
+// map header, saving 8 bytes per entry.
 type HashStructure struct {
 	sizeBase
+	fields map[string][]byte
 	mtimeBase
-	lockBase
-	fields    map[string][]byte
 	expiresAt uint32 // key-level expiry, unix seconds, 0 = no expiry
+	lockBase
 }
 
 func NewHashStructure() *HashStructure {

@@ -16,12 +16,15 @@ type wireValue struct {
 }
 
 // ValueStructure holds a raw byte payload with an optional key-level expiry.
+// Field order matters here: grouping the 4-byte fields (mtimeBase, expiresAt,
+// lockBase) after Data avoids the padding Go would otherwise insert to
+// 8-byte-align Data's slice header, saving 8 bytes per entry.
 type ValueStructure struct {
 	sizeBase
+	Data []byte
 	mtimeBase
-	lockBase
-	Data      []byte
 	expiresAt uint32 // unix seconds, 0 = no expiry
+	lockBase
 }
 
 func NewValueStructure(data []byte) *ValueStructure {

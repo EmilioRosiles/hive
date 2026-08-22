@@ -198,26 +198,26 @@ func (ds *DataStore) getShard(key string) *shard {
 	return ds.shards[h&(ds.shardsCount-1)]
 }
 
-// removeEntry removes key from s, decrementing the global used counter.
+// removeEntry removes key from s given its already-looked-up entry e (which
+// must be non-nil), decrementing the global used counter. Taking e as a
+// parameter rather than looking it up again saves a second map access at
+// every call site, all of which already have it in hand.
 // Must be called with s's write lock held.
-func (ds *DataStore) removeEntry(s *shard, key string) {
-	e, ok := s.data[key]
-	if !ok {
-		return
-	}
+func (ds *DataStore) removeEntry(s *shard, key string, e DataStructure) {
 	ds.used.Add(-e.cachedSize())
 	delete(s.data, key)
 }
 
-// upsertEntry inserts or replaces key in s, updating the global used counter.
-// Returns ErrCapacityExceeded if the write would push used above capacity.
-// Overwrites that reduce or maintain entry size always succeed.
-// Must be called with s's write lock held.
-func (ds *DataStore) upsertEntry(s *shard, key string, e DataStructure) error {
+// upsertEntry inserts or replaces key in s given its already-looked-up old
+// value (existing, exists — the zero value/false if key is new), updating
+// the global used counter. Returns ErrCapacityExceeded if the write would
+// push used above capacity. Overwrites that reduce or maintain entry size
+// always succeed. Must be called with s's write lock held.
+func (ds *DataStore) upsertEntry(s *shard, key string, e DataStructure, existing DataStructure, exists bool) error {
 	size := int64(len(key)) + e.ByteSize() + entryOverhead
 
-	if old, ok := s.data[key]; ok {
-		delta := size - old.cachedSize()
+	if exists {
+		delta := size - existing.cachedSize()
 		if delta > 0 && ds.used.Load()+delta > ds.capacity {
 			return ErrCapacityExceeded
 		}
@@ -253,7 +253,8 @@ func (ds *DataStore) Get(key string) (DataStructure, bool) {
 func (ds *DataStore) Set(key string, e DataStructure) error {
 	s := ds.getShard(key)
 	s.mu.Lock()
-	err := ds.upsertEntry(s, key, e)
+	existing, exists := s.data[key]
+	err := ds.upsertEntry(s, key, e, existing, exists)
 	s.mu.Unlock()
 	return err
 }
@@ -261,7 +262,9 @@ func (ds *DataStore) Set(key string, e DataStructure) error {
 func (ds *DataStore) Del(key string) {
 	s := ds.getShard(key)
 	s.mu.Lock()
-	ds.removeEntry(s, key)
+	if e, ok := s.data[key]; ok {
+		ds.removeEntry(s, key, e)
+	}
 	s.mu.Unlock()
 }
 
@@ -306,15 +309,18 @@ func (ds *DataStore) Apply(key string, fn func(DataStructure) (DataStructure, er
 	s := ds.getShard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next, err := fn(s.data[key])
+	existing, exists := s.data[key]
+	next, err := fn(existing)
 	if err != nil {
 		return err
 	}
 	if next == nil {
-		ds.removeEntry(s, key)
+		if exists {
+			ds.removeEntry(s, key, existing)
+		}
 		return nil
 	}
-	return ds.upsertEntry(s, key, next)
+	return ds.upsertEntry(s, key, next, existing, exists)
 }
 
 // ApplyIfNewer stores incoming only when its MTime exceeds the currently
@@ -400,7 +406,7 @@ func (ds *DataStore) DeleteExpired() {
 		s.mu.Lock()
 		for key, e := range s.data {
 			if exp := e.KeyExpiry(); exp != 0 && nowUnix >= exp {
-				ds.removeEntry(s, key)
+				ds.removeEntry(s, key, e)
 			}
 		}
 		s.mu.Unlock()

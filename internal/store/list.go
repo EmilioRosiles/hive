@@ -8,14 +8,17 @@ import (
 // buffer so push/pop at both ends are O(1) amortized. There is no
 // per-element TTL — only a key-level expiry applies.
 // The shard lock in DataStore protects all field access.
+// Field order matters here: grouping the 4-byte fields (mtimeBase, expiresAt,
+// lockBase) after the 8-byte fields avoids trailing padding, saving 8 bytes
+// per entry.
 type ListStructure struct {
 	sizeBase
+	buf    [][]byte // circular backing array; len(buf) is current capacity
+	head   int      // physical index of logical position 0
+	length int      // number of live elements
 	mtimeBase
+	expiresAt uint32 // unix seconds, 0 = no expiry
 	lockBase
-	buf       [][]byte // circular backing array; len(buf) is current capacity
-	head      int      // physical index of logical position 0
-	length    int      // number of live elements
-	expiresAt uint32   // unix seconds, 0 = no expiry
 }
 
 func NewListStructure() *ListStructure {

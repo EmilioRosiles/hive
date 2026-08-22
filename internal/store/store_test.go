@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // -- helpers --
@@ -39,6 +40,31 @@ func totalEntries(ds *DataStore) int {
 // entrySize returns the accounting cost for key + value string v.
 func entrySize(key, v string) int64 {
 	return int64(len(key)) + int64(len(v)) + mtimeSize + keyExpirySize + entryOverhead
+}
+
+// -- struct layout --
+
+// TestStructSizes_NoAccidentalPadding guards the field ordering in each
+// DataStructure type: a careless field insertion in the middle of one of
+// these structs silently reintroduces 8 bytes of alignment padding per
+// entry. See the field-order comment on each type.
+func TestStructSizes_NoAccidentalPadding(t *testing.T) {
+	cases := []struct {
+		name string
+		size uintptr
+		want uintptr
+	}{
+		{"ValueStructure", unsafe.Sizeof(ValueStructure{}), 48},
+		{"SetStructure", unsafe.Sizeof(SetStructure{}), 32},
+		{"HashStructure", unsafe.Sizeof(HashStructure{}), 32},
+		{"ListStructure", unsafe.Sizeof(ListStructure{}), 64},
+		{"ZSetStructure", unsafe.Sizeof(ZSetStructure{}), 72},
+	}
+	for _, c := range cases {
+		if c.size != c.want {
+			t.Errorf("%s: got %d bytes, want %d — check field order for new padding", c.name, c.size, c.want)
+		}
+	}
 }
 
 // -- Set / Get --

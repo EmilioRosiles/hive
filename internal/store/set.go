@@ -7,12 +7,15 @@ import (
 // SetStructure is a set of unique string members. There is no per-member
 // TTL — only a key-level expiry applies.
 // The shard lock in DataStore protects all field access — no internal lock needed.
+// Field order matters here: grouping the 4-byte fields (mtimeBase, expiresAt,
+// lockBase) after members avoids padding Go would otherwise insert around
+// the map header, saving 8 bytes per entry.
 type SetStructure struct {
 	sizeBase
+	members map[string]struct{}
 	mtimeBase
-	lockBase
-	members   map[string]struct{}
 	expiresAt uint32 // key-level expiry, unix seconds, 0 = no expiry
+	lockBase
 }
 
 func NewSetStructure() *SetStructure {

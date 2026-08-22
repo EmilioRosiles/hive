@@ -41,17 +41,20 @@ type zsetNode struct {
 // score, kept in ascending score order via a skip list. Ties are broken
 // lexicographically by member name (Redis-compatible). The shard lock in
 // DataStore protects all field access.
+// Field order matters here: grouping the 4-byte fields (mtimeBase, expiresAt,
+// lockBase) after the 8-byte fields avoids trailing padding, saving 8 bytes
+// per entry.
 type ZSetStructure struct {
 	sizeBase
-	mtimeBase
-	lockBase
 	scores    map[string]float64 // O(1) lookup by member
 	head      *zsetNode          // sentinel; head.level grows lazily, never shrinks
 	tail      *zsetNode
 	length    int
-	level     int    // highest tower level currently in use
-	nodeBytes int64  // incrementally maintained byte cost of head + all nodes
+	level     int   // highest tower level currently in use
+	nodeBytes int64 // incrementally maintained byte cost of head + all nodes
+	mtimeBase
 	expiresAt uint32 // unix seconds, 0 = no expiry
+	lockBase
 }
 
 func NewZSetStructure() *ZSetStructure {
