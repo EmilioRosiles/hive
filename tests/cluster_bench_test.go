@@ -70,7 +70,7 @@ func BenchmarkCluster_ConcurrentWrites(b *testing.B) {
 					n := counter.Add(1)
 					store := stores[n%uint64(len(stores))]
 					key := fmt.Sprintf("k-%d", n%benchKeySpace)
-					if err := store.Set(key, Session{UserID: int(n)}); err != nil {
+					if err := store.Set(b.Context(), key, Session{UserID: int(n)}); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -103,7 +103,7 @@ func BenchmarkCluster_ForwardedSet(b *testing.B) {
 	b.Run("SingleThreaded", func(b *testing.B) {
 		b.ResetTimer()
 		for i := range b.N {
-			if err := store.Set(fmt.Sprintf("k-%d", i%benchKeySpace), v); err != nil {
+			if err := store.Set(b.Context(), fmt.Sprintf("k-%d", i%benchKeySpace), v); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -115,7 +115,7 @@ func BenchmarkCluster_ForwardedSet(b *testing.B) {
 			for pb.Next() {
 				n := counter.Add(1)
 				key := fmt.Sprintf("k-%d", n%benchKeySpace)
-				if err := store.Set(key, v); err != nil {
+				if err := store.Set(b.Context(), key, v); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -130,7 +130,7 @@ func BenchmarkCluster_ForwardedGet(b *testing.B) {
 	store := hive.NewValueStore[Session](cache, "bench")
 	v := Session{UserID: 1, Token: "bench-token"}
 	for i := range benchKeySpace {
-		if err := store.Set(fmt.Sprintf("k-%d", i), v); err != nil {
+		if err := store.Set(b.Context(), fmt.Sprintf("k-%d", i), v); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -138,7 +138,7 @@ func BenchmarkCluster_ForwardedGet(b *testing.B) {
 	b.Run("SingleThreaded", func(b *testing.B) {
 		b.ResetTimer()
 		for i := range b.N {
-			if _, err := store.Get(fmt.Sprintf("k-%d", i%benchKeySpace)); err != nil {
+			if _, err := store.Get(b.Context(), fmt.Sprintf("k-%d", i%benchKeySpace)); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -150,7 +150,44 @@ func BenchmarkCluster_ForwardedGet(b *testing.B) {
 			for pb.Next() {
 				n := counter.Add(1)
 				key := fmt.Sprintf("k-%d", n%benchKeySpace)
-				if _, err := store.Get(key); err != nil {
+				if _, err := store.Get(b.Context(), key); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	})
+}
+
+// BenchmarkCluster_ForwardedLock measures a full Lock+Unlock round trip when
+// every op must be routed cross-node — see benchForwardingCluster. Each call
+// uses a fresh key so it never contends with a prior or concurrent one.
+func BenchmarkCluster_ForwardedLock(b *testing.B) {
+	cache := benchForwardingCluster(b)
+	store := hive.NewValueStore[Session](cache, "bench")
+
+	b.Run("SingleThreaded", func(b *testing.B) {
+		b.ResetTimer()
+		for i := range b.N {
+			lock, err := store.Lock(b.Context(), fmt.Sprintf("lock-%d", i), time.Minute)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := lock.Unlock(b.Context()); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("Concurrent", func(b *testing.B) {
+		var counter atomic.Uint64
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				n := counter.Add(1)
+				lock, err := store.Lock(b.Context(), fmt.Sprintf("lock-%d", n), time.Minute)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if err := lock.Unlock(b.Context()); err != nil {
 					b.Fatal(err)
 				}
 			}

@@ -5,7 +5,6 @@ import (
 	"math/rand/v2"
 	"sort"
 	"testing"
-	"time"
 )
 
 func TestZSetZAddAndZScore(t *testing.T) {
@@ -399,17 +398,6 @@ func TestZSetEncodeDecodeRoundTrip(t *testing.T) {
 		if entries[i].Member != want {
 			t.Errorf("round-trip order[%d]: got %s, want %s", i, entries[i].Member, want)
 		}
-	}
-}
-
-func TestZSetCleanupIsNoOp(t *testing.T) {
-	z := NewZSetStructure()
-	z.ZAdd("x", 1.0)
-	if z.Cleanup(time.Now()) {
-		t.Error("Cleanup: should always return false for zsets")
-	}
-	if z.ZCard() != 1 {
-		t.Error("Cleanup: should not remove zset members")
 	}
 }
 

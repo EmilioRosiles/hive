@@ -7,10 +7,12 @@ import (
 
 // ForwardRequest asks the receiving node to execute an operation locally.
 // Args are positional raw byte slots — no intermediate struct encoding.
+// LockToken authorizes the op against a locked key; 0 means none provided.
 type ForwardRequest struct {
-	Op   Op
-	Key  string
-	Args [][]byte
+	Op        Op
+	Key       string
+	Args      [][]byte
+	LockToken uint32
 }
 
 // ForwardResponse carries the result of a forwarded operation.
@@ -30,13 +32,14 @@ type ForwardBatch struct {
 //
 // Wire layout (all integers big-endian):
 //
-//	Op       uint8
-//	KeyLen   uint32
-//	Key      [KeyLen]byte
-//	ArgCount uint32
+//	Op        uint8
+//	KeyLen    uint32
+//	Key       [KeyLen]byte
+//	ArgCount  uint32
 //	repeated ArgCount times:
-//	  ArgLen uint32
-//	  Arg    [ArgLen]byte
+//	  ArgLen  uint32
+//	  Arg     [ArgLen]byte
+//	LockToken uint32
 
 func (r ForwardRequest) MarshalBinary() ([]byte, error) {
 	buf := make([]byte, r.encodedSize())
@@ -46,7 +49,7 @@ func (r ForwardRequest) MarshalBinary() ([]byte, error) {
 
 // encodedSize returns r's exact encoded length in bytes.
 func (r ForwardRequest) encodedSize() int {
-	size := 1 + 4 + len(r.Key) + 4
+	size := 1 + 4 + len(r.Key) + 4 + 4
 	for _, a := range r.Args {
 		size += 4 + len(a)
 	}
@@ -70,6 +73,8 @@ func (r ForwardRequest) encodeInto(buf []byte, i int) int {
 		i += 4
 		i += copy(buf[i:], a)
 	}
+	binary.BigEndian.PutUint32(buf[i:], r.LockToken)
+	i += 4
 	return i
 }
 
@@ -110,7 +115,11 @@ func decodeForwardRequest(br *binReader) (ForwardRequest, error) {
 		}
 		args = append(args, a)
 	}
-	return ForwardRequest{Op: Op(op), Key: key, Args: args}, nil
+	lockToken, err := br.uint32()
+	if err != nil {
+		return ForwardRequest{}, fmt.Errorf("transport: decode ForwardRequest: %w", err)
+	}
+	return ForwardRequest{Op: Op(op), Key: key, Args: args, LockToken: lockToken}, nil
 }
 
 // -- ForwardResponse wire codec --
@@ -168,9 +177,9 @@ func (r *ForwardResponse) UnmarshalBinary(data []byte) error {
 //	repeated RequestCount times: ForwardRequest (same layout as above)
 
 // forwardRequestMinSize is a ForwardRequest's minimum possible encoded size
-// (Op + KeyLen + ArgCount, with an empty key and no args) — used to bound
-// RequestCount against the remaining buffer before allocating.
-const forwardRequestMinSize = 1 + 4 + 4
+// (Op + KeyLen + ArgCount + LockToken, with an empty key and no args) — used
+// to bound RequestCount against the remaining buffer before allocating.
+const forwardRequestMinSize = 1 + 4 + 4 + 4
 
 func (b ForwardBatch) MarshalBinary() ([]byte, error) {
 	size := 4

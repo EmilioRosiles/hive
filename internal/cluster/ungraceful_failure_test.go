@@ -91,7 +91,7 @@ func TestCluster_UngracefulFailure_DetectedAndDataSurvives(t *testing.T) {
 	// Write through n1 while all three nodes are healthy, with RF=2 so at
 	// least one other node holds a replica.
 	const key = "ungraceful-key"
-	if _, err := n1.Exec(transport.OpValueSet, key, []byte("value")); err != nil {
+	if _, err := n1.Exec(t.Context(), transport.OpValueSet, key, []byte("value")); err != nil {
 		t.Fatalf("Exec Set: %v", err)
 	}
 	// Let the write actually finish replicating before we crash anything —
@@ -99,8 +99,8 @@ func TestCluster_UngracefulFailure_DetectedAndDataSurvives(t *testing.T) {
 	// separately-accepted primary-death data-loss window, not what this
 	// test is checking.
 	waitForCond(t, time.Second, "write replicated before kill", func() bool {
-		_, err2 := n2.Exec(transport.OpValueGet, key)
-		_, err3 := n3.Exec(transport.OpValueGet, key)
+		_, err2 := n2.Exec(t.Context(), transport.OpValueGet, key)
+		_, err3 := n3.Exec(t.Context(), transport.OpValueGet, key)
 		return err2 == nil || err3 == nil
 	})
 
@@ -117,8 +117,8 @@ func TestCluster_UngracefulFailure_DetectedAndDataSurvives(t *testing.T) {
 	// Rebalance should redistribute n3's share of the keyspace; the key must
 	// still be readable from at least one surviving node afterward.
 	waitForCond(t, 2*time.Second, "key survives the crash", func() bool {
-		_, err1 := n1.Exec(transport.OpValueGet, key)
-		_, err2 := n2.Exec(transport.OpValueGet, key)
+		_, err1 := n1.Exec(t.Context(), transport.OpValueGet, key)
+		_, err2 := n2.Exec(t.Context(), transport.OpValueGet, key)
 		return err1 == nil || err2 == nil
 	})
 }

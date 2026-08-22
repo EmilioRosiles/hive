@@ -32,7 +32,7 @@ func (m *Cluster) handleRebalance(payload []byte) ([]byte, error) {
 			if remaining <= 0 {
 				continue // expired in transit
 			}
-			entry.SetKeyExpiry(received.Add(remaining).Unix())
+			entry.SetKeyExpiry(uint32(received.Add(remaining).Unix()))
 		}
 		if err := m.store.ApplyIfNewer(re.Key, entry); err != nil {
 			slog.Warn("rebalance: store failed", "key", re.Key, "err", err)
@@ -106,7 +106,7 @@ func (rm *rebalancer) run() {
 		if leader == m.cfg.NodeID {
 			ttl := int64(0)
 			if exp := entry.KeyExpiry(); exp != 0 {
-				ttl = time.Until(time.Unix(exp, 0)).Nanoseconds()
+				ttl = time.Until(time.Unix(int64(exp), 0)).Nanoseconds()
 				if ttl <= 0 {
 					return // already expired
 				}

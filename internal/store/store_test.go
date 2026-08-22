@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // -- helpers --
@@ -39,6 +40,29 @@ func totalEntries(ds *DataStore) int {
 // entrySize returns the accounting cost for key + value string v.
 func entrySize(key, v string) int64 {
 	return int64(len(key)) + int64(len(v)) + mtimeSize + keyExpirySize + entryOverhead
+}
+
+// -- struct layout --
+
+// TestStructSizes_NoAccidentalPadding catches a field insertion that
+// reintroduces alignment padding into any DataStructure type.
+func TestStructSizes_NoAccidentalPadding(t *testing.T) {
+	cases := []struct {
+		name string
+		size uintptr
+		want uintptr
+	}{
+		{"ValueStructure", unsafe.Sizeof(ValueStructure{}), 48},
+		{"SetStructure", unsafe.Sizeof(SetStructure{}), 32},
+		{"HashStructure", unsafe.Sizeof(HashStructure{}), 32},
+		{"ListStructure", unsafe.Sizeof(ListStructure{}), 64},
+		{"ZSetStructure", unsafe.Sizeof(ZSetStructure{}), 72},
+	}
+	for _, c := range cases {
+		if c.size != c.want {
+			t.Errorf("%s: got %d bytes, want %d — check field order for new padding", c.name, c.size, c.want)
+		}
+	}
 }
 
 // -- Set / Get --
@@ -159,7 +183,7 @@ func TestReadCallsFnForExistingKey(t *testing.T) {
 	ds := NewDataStore(unlimited)
 	mustSet(t, ds, "k", val("v"))
 	called := false
-	ds.Read("k", func(e DataStructure) { called = true })
+	ds.Read("k", func(e DataStructure) error { called = true; return nil })
 	if !called {
 		t.Error("Read: fn should be called for existing key")
 	}
@@ -167,7 +191,7 @@ func TestReadCallsFnForExistingKey(t *testing.T) {
 
 func TestReadSkipsMissingKey(t *testing.T) {
 	ds := NewDataStore(unlimited)
-	ds.Read("missing", func(DataStructure) { t.Error("Read: fn should not be called for missing key") })
+	ds.Read("missing", func(DataStructure) error { t.Error("Read: fn should not be called for missing key"); return nil })
 }
 
 func TestReadSkipsExpiredKey(t *testing.T) {
@@ -175,7 +199,7 @@ func TestReadSkipsExpiredKey(t *testing.T) {
 	e := NewValueStructureWithTTL([]byte("v"), 10*time.Millisecond)
 	mustSet(t, ds, "k", e)
 	time.Sleep(20 * time.Millisecond)
-	ds.Read("k", func(DataStructure) { t.Error("Read: fn should not be called for expired key") })
+	ds.Read("k", func(DataStructure) error { t.Error("Read: fn should not be called for expired key"); return nil })
 }
 
 // -- Apply --
@@ -371,26 +395,6 @@ func TestDeleteExpiredRemovesExpiredEntries(t *testing.T) {
 	}
 	if ds.used.Load() >= usedBefore {
 		t.Errorf("DeleteExpired: used should decrease; before=%d after=%d", usedBefore, ds.used.Load())
-	}
-}
-
-func TestDeleteExpiredRemovesEmptySet(t *testing.T) {
-	ds := NewDataStore(unlimited)
-
-	err := ds.Apply("s", func(_ DataStructure) (DataStructure, error) {
-		ss := NewSetStructure()
-		ss.AddWithTTL("member", 10*time.Millisecond)
-		return ss, nil
-	})
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	time.Sleep(20 * time.Millisecond)
-	ds.DeleteExpired()
-
-	if _, ok := ds.Get("s"); ok {
-		t.Error("DeleteExpired: set with all-expired members should be removed")
 	}
 }
 

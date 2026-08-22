@@ -1,63 +1,45 @@
 package store
 
 import (
-	"time"
-
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// hashField is a single field value with an optional per-field TTL.
-type hashField struct {
-	Data      []byte
-	expiresAt int64 // unix nanoseconds, 0 = no expiry
-}
-
-func (f hashField) alive(nowNs int64) bool {
-	return f.expiresAt == 0 || nowNs <= f.expiresAt
-}
-
-// HashStructure is a map of string fields to typed values with optional per-field TTL.
+// HashStructure is a map of string fields to byte-slice values. There is no
+// per-field TTL — only a key-level expiry applies.
 // The shard lock in DataStore protects all field access — no internal lock needed.
 type HashStructure struct {
 	sizeBase
+	fields map[string][]byte
 	mtimeBase
-	fields    map[string]hashField
-	expiresAt int64 // key-level expiry, unix seconds, 0 = no expiry
+	expiresAt uint32 // key-level expiry, unix seconds, 0 = no expiry
+	lockBase
 }
 
 func NewHashStructure() *HashStructure {
-	return &HashStructure{fields: make(map[string]hashField)}
+	return &HashStructure{fields: make(map[string][]byte)}
 }
 
-func (h *HashStructure) Kind() Kind           { return KindHash }
-func (h *HashStructure) KeyExpiry() int64     { return h.expiresAt }
-func (h *HashStructure) SetKeyExpiry(t int64) { h.expiresAt = t }
+func (h *HashStructure) Kind() Kind            { return KindHash }
+func (h *HashStructure) KeyExpiry() uint32     { return h.expiresAt }
+func (h *HashStructure) SetKeyExpiry(t uint32) { h.expiresAt = t }
 
 func (h *HashStructure) ByteSize() int64 {
 	var n int64
-	for name, f := range h.fields {
-		n += int64(len(name)+len(f.Data)) + mapEntryOverhead
+	for name, data := range h.fields {
+		n += int64(len(name)+len(data)) + mapBucketOverhead
 	}
 	return n + mtimeSize + keyExpirySize
 }
 
-// HSet sets field to data with no expiry. An existing TTL is cleared.
+// HSet sets field to data.
 func (h *HashStructure) HSet(field string, data []byte) {
-	h.fields[field] = hashField{Data: data}
+	h.fields[field] = data
 }
 
-// HSetWithTTL sets field to data, expiring the field after ttl.
-func (h *HashStructure) HSetWithTTL(field string, data []byte, ttl time.Duration) {
-	h.fields[field] = hashField{Data: data, expiresAt: time.Now().Add(ttl).UnixNano()}
-}
-
-// HGet returns the data for field and whether it exists and has not expired.
+// HGet returns the data for field and whether it exists.
 func (h *HashStructure) HGet(field string) ([]byte, bool) {
-	f, ok := h.fields[field]
-	if !ok || !f.alive(time.Now().UnixNano()) {
-		return nil, false
-	}
-	return f.Data, true
+	data, ok := h.fields[field]
+	return data, ok
 }
 
 // HDel removes field. No-op if it does not exist.
@@ -65,78 +47,43 @@ func (h *HashStructure) HDel(field string) {
 	delete(h.fields, field)
 }
 
-// Fields returns the names of all live (non-expired) fields.
+// Fields returns the names of all fields.
 func (h *HashStructure) Fields() []string {
-	now := time.Now().UnixNano()
 	out := make([]string, 0, len(h.fields))
-	for name, f := range h.fields {
-		if f.alive(now) {
-			out = append(out, name)
-		}
+	for name := range h.fields {
+		out = append(out, name)
 	}
 	return out
 }
 
-// Len returns the total number of fields (including expired ones not yet cleaned up).
-// Used to pre-size slices before AppendAll.
+// Len returns the number of fields.
 func (h *HashStructure) Len() int { return len(h.fields) }
 
-// AppendAll appends live field name/value pairs to out as alternating
+// AppendAll appends field name/value pairs to out as alternating
 // [field, value, field, value, ...] []byte slices and returns the result.
 // This avoids the intermediate map allocation that a GetAll() map return would require.
 func (h *HashStructure) AppendAll(out [][]byte) [][]byte {
-	now := time.Now().UnixNano()
-	for name, f := range h.fields {
-		if f.alive(now) {
-			out = append(out, []byte(name), f.Data)
-		}
+	for name, data := range h.fields {
+		out = append(out, []byte(name), data)
 	}
 	return out
-}
-
-// ExpireField sets a TTL on an existing field. No-op if field does not exist.
-func (h *HashStructure) ExpireField(field string, ttl time.Duration) {
-	if f, ok := h.fields[field]; ok {
-		f.expiresAt = time.Now().Add(ttl).UnixNano()
-		h.fields[field] = f
-	}
-}
-
-// Cleanup removes expired fields and reports whether the hash is empty.
-// Called by the DataStore janitor while the shard write lock is held.
-func (h *HashStructure) Cleanup(now time.Time) bool {
-	nowNs := now.UnixNano()
-	for name, f := range h.fields {
-		if !f.alive(nowNs) {
-			delete(h.fields, name)
-		}
-	}
-	return len(h.fields) == 0
 }
 
 // -- serialization for rebalance --
 
-type wireHashField struct {
-	Data      []byte `msgpack:"d"`
-	ExpiresAt int64  `msgpack:"e"`
-}
-
 type wireHash struct {
-	Fields    map[string]wireHashField `msgpack:"f"`
-	ExpiresAt int64                    `msgpack:"e"`
-	MTime     uint32                   `msgpack:"mt"`
+	Fields        map[string][]byte `msgpack:"f"`
+	ExpiresAt     uint32            `msgpack:"e"`
+	MTime         uint32            `msgpack:"mt"`
+	LockToken     uint32            `msgpack:"lt"`
+	LockExpiresAt uint32            `msgpack:"le"`
 }
 
 func (h *HashStructure) Encode() ([]byte, error) {
-	w := wireHash{
-		Fields:    make(map[string]wireHashField, len(h.fields)),
-		ExpiresAt: h.expiresAt,
-		MTime:     h.mtime,
-	}
-	for name, f := range h.fields {
-		w.Fields[name] = wireHashField{Data: f.Data, ExpiresAt: f.expiresAt}
-	}
-	return msgpack.Marshal(w)
+	return msgpack.Marshal(wireHash{
+		Fields: h.fields, ExpiresAt: h.expiresAt, MTime: h.mtime,
+		LockToken: h.lockToken, LockExpiresAt: h.lockExpiresAt,
+	})
 }
 
 func DecodeHashStructure(data []byte) (*HashStructure, error) {
@@ -144,11 +91,12 @@ func DecodeHashStructure(data []byte) (*HashStructure, error) {
 	if err := msgpack.Unmarshal(data, &w); err != nil {
 		return nil, err
 	}
-	fields := make(map[string]hashField, len(w.Fields))
-	for name, wf := range w.Fields {
-		fields[name] = hashField{Data: wf.Data, expiresAt: wf.ExpiresAt}
+	if w.Fields == nil {
+		w.Fields = make(map[string][]byte)
 	}
-	hs := &HashStructure{fields: fields, expiresAt: w.ExpiresAt}
+	hs := &HashStructure{fields: w.Fields, expiresAt: w.ExpiresAt}
 	hs.mtime = w.MTime
+	hs.lockToken = w.LockToken
+	hs.lockExpiresAt = w.LockExpiresAt
 	return hs, nil
 }

@@ -1,8 +1,6 @@
 package store
 
 import (
-	"time"
-
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -12,20 +10,21 @@ import (
 // The shard lock in DataStore protects all field access.
 type ListStructure struct {
 	sizeBase
+	buf    [][]byte // circular backing array; len(buf) is current capacity
+	head   int      // physical index of logical position 0
+	length int      // number of live elements
 	mtimeBase
-	buf       [][]byte // circular backing array; len(buf) is current capacity
-	head      int      // physical index of logical position 0
-	length    int      // number of live elements
-	expiresAt int64    // unix seconds, 0 = no expiry
+	expiresAt uint32 // unix seconds, 0 = no expiry
+	lockBase
 }
 
 func NewListStructure() *ListStructure {
 	return &ListStructure{}
 }
 
-func (l *ListStructure) Kind() Kind           { return KindList }
-func (l *ListStructure) KeyExpiry() int64     { return l.expiresAt }
-func (l *ListStructure) SetKeyExpiry(t int64) { l.expiresAt = t }
+func (l *ListStructure) Kind() Kind            { return KindList }
+func (l *ListStructure) KeyExpiry() uint32     { return l.expiresAt }
+func (l *ListStructure) SetKeyExpiry(t uint32) { l.expiresAt = t }
 
 func (l *ListStructure) ByteSize() int64 {
 	var n int64
@@ -141,9 +140,6 @@ func (l *ListStructure) Range(start, stop int) [][]byte {
 	return out
 }
 
-// Cleanup is a no-op — list elements do not independently expire.
-func (l *ListStructure) Cleanup(_ time.Time) bool { return false }
-
 // resolveListIndex normalises a possibly-negative index into an absolute
 // position. Returns (pos, true) on success or (0, false) if out of bounds.
 func resolveListIndex(i, length int) (int, bool) {
@@ -173,9 +169,11 @@ func normalizeListBound(b, length int) int {
 // -- serialization --
 
 type wireList struct {
-	Items     [][]byte `msgpack:"i"`
-	ExpiresAt int64    `msgpack:"e"`
-	MTime     uint32   `msgpack:"mt"`
+	Items         [][]byte `msgpack:"i"`
+	ExpiresAt     uint32   `msgpack:"e"`
+	MTime         uint32   `msgpack:"mt"`
+	LockToken     uint32   `msgpack:"lt"`
+	LockExpiresAt uint32   `msgpack:"le"`
 }
 
 func (l *ListStructure) Encode() ([]byte, error) {
@@ -183,7 +181,10 @@ func (l *ListStructure) Encode() ([]byte, error) {
 	for i := range items {
 		items[i] = l.at(i)
 	}
-	return msgpack.Marshal(wireList{Items: items, ExpiresAt: l.expiresAt, MTime: l.mtime})
+	return msgpack.Marshal(wireList{
+		Items: items, ExpiresAt: l.expiresAt, MTime: l.mtime,
+		LockToken: l.lockToken, LockExpiresAt: l.lockExpiresAt,
+	})
 }
 
 func DecodeListStructure(data []byte) (*ListStructure, error) {
@@ -193,5 +194,7 @@ func DecodeListStructure(data []byte) (*ListStructure, error) {
 	}
 	ls := &ListStructure{buf: w.Items, length: len(w.Items), expiresAt: w.ExpiresAt}
 	ls.mtime = w.MTime
+	ls.lockToken = w.LockToken
+	ls.lockExpiresAt = w.LockExpiresAt
 	return ls, nil
 }

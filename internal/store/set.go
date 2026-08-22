@@ -1,44 +1,39 @@
 package store
 
 import (
-	"time"
-
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// SetStructure is a set of unique string members with optional per-member TTL.
+// SetStructure is a set of unique string members. There is no per-member
+// TTL — only a key-level expiry applies.
 // The shard lock in DataStore protects all field access — no internal lock needed.
 type SetStructure struct {
 	sizeBase
+	members map[string]struct{}
 	mtimeBase
-	members   map[string]int64 // member → expiresAt unix nanoseconds, 0 = no expiry
-	expiresAt int64            // key-level expiry, unix seconds, 0 = no expiry
+	expiresAt uint32 // key-level expiry, unix seconds, 0 = no expiry
+	lockBase
 }
 
 func NewSetStructure() *SetStructure {
-	return &SetStructure{members: make(map[string]int64)}
+	return &SetStructure{members: make(map[string]struct{})}
 }
 
-func (s *SetStructure) Kind() Kind           { return KindSet }
-func (s *SetStructure) KeyExpiry() int64     { return s.expiresAt }
-func (s *SetStructure) SetKeyExpiry(t int64) { s.expiresAt = t }
+func (s *SetStructure) Kind() Kind            { return KindSet }
+func (s *SetStructure) KeyExpiry() uint32     { return s.expiresAt }
+func (s *SetStructure) SetKeyExpiry(t uint32) { s.expiresAt = t }
 
 func (s *SetStructure) ByteSize() int64 {
 	var n int64
 	for m := range s.members {
-		n += int64(len(m)) + mapEntryOverhead
+		n += int64(len(m)) + mapBucketOverhead
 	}
 	return n + mtimeSize + keyExpirySize
 }
 
-// Add adds a member with no expiry. If the member already exists its TTL is cleared.
+// Add adds a member. No-op if it already exists.
 func (s *SetStructure) Add(member string) {
-	s.members[member] = 0
-}
-
-// AddWithTTL adds a member that expires after ttl.
-func (s *SetStructure) AddWithTTL(member string, ttl time.Duration) {
-	s.members[member] = time.Now().Add(ttl).UnixNano()
+	s.members[member] = struct{}{}
 }
 
 // Remove deletes a member. No-op if it does not exist.
@@ -46,69 +41,42 @@ func (s *SetStructure) Remove(member string) {
 	delete(s.members, member)
 }
 
-// IsMember reports whether member exists and has not expired.
+// IsMember reports whether member exists.
 func (s *SetStructure) IsMember(member string) bool {
-	exp, ok := s.members[member]
-	if !ok {
-		return false
-	}
-	return exp == 0 || time.Now().UnixNano() <= exp
+	_, ok := s.members[member]
+	return ok
 }
 
-// Members returns all live (non-expired) members.
+// Members returns all members.
 func (s *SetStructure) Members() []string {
-	now := time.Now().UnixNano()
 	out := make([]string, 0, len(s.members))
-	for m, exp := range s.members {
-		if exp == 0 || now <= exp {
-			out = append(out, m)
-		}
+	for m := range s.members {
+		out = append(out, m)
 	}
 	return out
 }
 
-// Card returns the number of live members.
+// Card returns the number of members.
 func (s *SetStructure) Card() int {
-	now := time.Now().UnixNano()
-	n := 0
-	for _, exp := range s.members {
-		if exp == 0 || now <= exp {
-			n++
-		}
-	}
-	return n
-}
-
-// ExpireMember sets a TTL on an existing member. No-op if member does not exist.
-func (s *SetStructure) ExpireMember(member string, ttl time.Duration) {
-	if _, ok := s.members[member]; ok {
-		s.members[member] = time.Now().Add(ttl).UnixNano()
-	}
-}
-
-// Cleanup removes expired members and reports whether the set is empty.
-// Called by the DataStore janitor while the shard write lock is held.
-func (s *SetStructure) Cleanup(now time.Time) bool {
-	nowNs := now.UnixNano()
-	for m, exp := range s.members {
-		if exp != 0 && nowNs > exp {
-			delete(s.members, m)
-		}
-	}
-	return len(s.members) == 0
+	return len(s.members)
 }
 
 // -- serialization for rebalance --
 
 // wireSet is the msgpack-serializable form of SetStructure.
 type wireSet struct {
-	Members   map[string]int64 `msgpack:"m"`
-	ExpiresAt int64            `msgpack:"e"`
-	MTime     uint32           `msgpack:"mt"`
+	Members       map[string]struct{} `msgpack:"m"`
+	ExpiresAt     uint32              `msgpack:"e"`
+	MTime         uint32              `msgpack:"mt"`
+	LockToken     uint32              `msgpack:"lt"`
+	LockExpiresAt uint32              `msgpack:"le"`
 }
 
 func (s *SetStructure) Encode() ([]byte, error) {
-	return msgpack.Marshal(wireSet{Members: s.members, ExpiresAt: s.expiresAt, MTime: s.mtime})
+	return msgpack.Marshal(wireSet{
+		Members: s.members, ExpiresAt: s.expiresAt, MTime: s.mtime,
+		LockToken: s.lockToken, LockExpiresAt: s.lockExpiresAt,
+	})
 }
 
 func DecodeSetStructure(data []byte) (*SetStructure, error) {
@@ -117,9 +85,11 @@ func DecodeSetStructure(data []byte) (*SetStructure, error) {
 		return nil, err
 	}
 	if w.Members == nil {
-		w.Members = make(map[string]int64)
+		w.Members = make(map[string]struct{})
 	}
 	ss := &SetStructure{members: w.Members, expiresAt: w.ExpiresAt}
 	ss.mtime = w.MTime
+	ss.lockToken = w.LockToken
+	ss.lockExpiresAt = w.LockExpiresAt
 	return ss, nil
 }

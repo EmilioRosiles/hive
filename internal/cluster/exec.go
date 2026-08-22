@@ -13,6 +13,10 @@ import (
 // Each function receives pre-decoded [][]byte arg slots and works directly
 // on the local store. No serialization happens here.
 // Arg slot positions are documented by the constants below.
+//
+// Each function also receives the caller's lock-authorization token, and
+// (except for Lock/Unlock/Renew) checks it via store.CheckLock inside its
+// existing Read/Apply callback.
 
 // OpScope describes how a cluster op is routed and replicated.
 type OpScope uint8
@@ -25,7 +29,7 @@ const (
 
 // opDef pairs an op's local execution function with its routing scope.
 type opDef struct {
-	Exec  func(m *Cluster, key string, args [][]byte) ([][]byte, error)
+	Exec  func(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error)
 	Scope OpScope
 }
 
@@ -35,23 +39,24 @@ type opDef struct {
 var opRegistry = map[transport.Op]opDef{
 	transport.OpDel:    {Exec: execDel, Scope: ScopeWrite},
 	transport.OpExpire: {Exec: execExpire, Scope: ScopeWrite},
+	transport.OpLock:   {Exec: execLock, Scope: ScopeWrite},
+	transport.OpUnlock: {Exec: execUnlock, Scope: ScopeWrite},
+	transport.OpRenew:  {Exec: execRenew, Scope: ScopeWrite},
 
 	transport.OpValueSet: {Exec: execValueSet, Scope: ScopeWrite},
 	transport.OpValueGet: {Exec: execValueGet, Scope: ScopeRead},
 
-	transport.OpSAdd:          {Exec: execSAdd, Scope: ScopeWrite},
-	transport.OpSRem:          {Exec: execSRem, Scope: ScopeWrite},
-	transport.OpSIsMember:     {Exec: execSIsMember, Scope: ScopeRead},
-	transport.OpSMembers:      {Exec: execSMembers, Scope: ScopeRead},
-	transport.OpSCard:         {Exec: execSCard, Scope: ScopeRead},
-	transport.OpSExpireMember: {Exec: execSExpireMember, Scope: ScopeWrite},
+	transport.OpSAdd:      {Exec: execSAdd, Scope: ScopeWrite},
+	transport.OpSRem:      {Exec: execSRem, Scope: ScopeWrite},
+	transport.OpSIsMember: {Exec: execSIsMember, Scope: ScopeRead},
+	transport.OpSMembers:  {Exec: execSMembers, Scope: ScopeRead},
+	transport.OpSCard:     {Exec: execSCard, Scope: ScopeRead},
 
-	transport.OpHSet:         {Exec: execHSet, Scope: ScopeWrite},
-	transport.OpHGet:         {Exec: execHGet, Scope: ScopeRead},
-	transport.OpHDel:         {Exec: execHDel, Scope: ScopeWrite},
-	transport.OpHGetAll:      {Exec: execHGetAll, Scope: ScopeRead},
-	transport.OpHKeys:        {Exec: execHKeys, Scope: ScopeRead},
-	transport.OpHExpireField: {Exec: execHExpireField, Scope: ScopeWrite},
+	transport.OpHSet:    {Exec: execHSet, Scope: ScopeWrite},
+	transport.OpHGet:    {Exec: execHGet, Scope: ScopeRead},
+	transport.OpHDel:    {Exec: execHDel, Scope: ScopeWrite},
+	transport.OpHGetAll: {Exec: execHGetAll, Scope: ScopeRead},
+	transport.OpHKeys:   {Exec: execHKeys, Scope: ScopeRead},
 
 	transport.OpLPush:  {Exec: execLPush, Scope: ScopeWrite},
 	transport.OpRPush:  {Exec: execRPush, Scope: ScopeWrite},
@@ -76,6 +81,16 @@ var opRegistry = map[transport.Op]opDef{
 
 const (
 	argExpireTTL = 0 // int64 ns big-endian
+)
+
+const (
+	argLockTTL   = 0 // int64 ns big-endian
+	argLockToken = 1 // uint32 big-endian; client-generated
+
+	argUnlockToken = 0 // uint32 big-endian
+
+	argRenewToken = 0 // uint32 big-endian
+	argRenewTTL   = 1 // int64 ns big-endian
 )
 
 const (
@@ -115,72 +130,153 @@ const (
 
 const (
 	argSAddMember = 0 // string
-	argSAddTTL    = 1 // int64 ns big-endian; absent = no expiry
 
 	argSRemMember = 0 // string
 
 	argSIsMemberMember = 0 // string
-
-	argSExpireMember = 0 // string
-	argSExpireTTL    = 1 // int64 ns big-endian
 )
 
 const (
 	argHSetField = 0 // string
 	argHSetData  = 1 // []byte
-	argHSetTTL   = 2 // int64 ns big-endian; absent = no expiry
 
 	argHGetField = 0 // string
 
 	argHDelField = 0 // string
-
-	argHExpireField    = 0 // string
-	argHExpireFieldTTL = 1 // int64 ns big-endian
 )
 
 // -- shared ops --
 
-func execDel(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
-	m.store.Del(key)
-	return nil, nil
+func execDel(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
+	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
+		return nil, nil
+	})
 }
 
-func execExpire(m *Cluster, key string, args [][]byte) ([][]byte, error) {
-	m.store.Expire(key, decodeTTL(args, argExpireTTL))
-	return nil, nil
+func execExpire(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
+	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
+		if ds == nil {
+			return nil, nil
+		}
+		if ttl := decodeTTL(args, argExpireTTL); ttl == 0 {
+			ds.SetKeyExpiry(0)
+		} else {
+			ds.SetKeyExpiry(uint32(time.Now().Add(ttl).Unix()))
+		}
+		return ds, nil
+	})
+}
+
+// -- lock ops --
+
+// execLock creates a lock on key with the caller-provided token, failing
+// with ErrKeyLocked if already locked. The check-and-set is atomic since
+// both happen inside the same Apply call; a placeholder entry is created if
+// key doesn't exist yet.
+func execLock(m *Cluster, key string, args [][]byte, _ uint32) ([][]byte, error) {
+	ttl := decodeTTL(args, argLockTTL)
+	token := decodeUint32(args, argLockToken)
+	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if ds != nil {
+			if exp := ds.LockExpiry(); exp != 0 && exp > uint32(time.Now().Unix()) {
+				return ds, ErrKeyLocked
+			}
+		} else {
+			ds = store.NewValueStructure(nil)
+		}
+		ds.SetLock(token, uint32(time.Now().Add(ttl).Unix()))
+		return ds, nil
+	})
+}
+
+// execUnlock releases the lock on key, provided token matches the current holder.
+func execUnlock(m *Cluster, key string, args [][]byte, _ uint32) ([][]byte, error) {
+	token := decodeUint32(args, argUnlockToken)
+	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if ds == nil || ds.LockExpiry() == 0 || ds.LockToken() != token {
+			return ds, ErrLockNotHeld
+		}
+		ds.SetLock(0, 0)
+		return ds, nil
+	})
+}
+
+// execRenew extends the lock's TTL, provided token matches the current holder.
+func execRenew(m *Cluster, key string, args [][]byte, _ uint32) ([][]byte, error) {
+	token := decodeUint32(args, argRenewToken)
+	ttl := decodeTTL(args, argRenewTTL)
+	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if ds == nil || ds.LockExpiry() == 0 || ds.LockToken() != token {
+			return ds, ErrLockNotHeld
+		}
+		ds.SetLock(token, uint32(time.Now().Add(ttl).Unix()))
+		return ds, nil
+	})
 }
 
 // -- value ops --
 
-func execValueSet(m *Cluster, key string, args [][]byte) ([][]byte, error) {
-	return nil, m.store.Set(key, store.NewValueStructure(args[argValueSetData]))
+// execValueSet replaces key's value, clearing any TTL but carrying over any
+// existing lock state onto the new entry.
+func execValueSet(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
+	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
+		v := store.NewValueStructure(args[argValueSetData])
+		if ds != nil {
+			v.SetLock(ds.LockToken(), ds.LockExpiry())
+		}
+		return v, nil
+	})
 }
 
-func execValueGet(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
-	e, ok := m.store.Get(key)
-	if !ok {
+func execValueGet(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
+	var data []byte
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
+		v, ok := ds.(*store.ValueStructure)
+		if !ok {
+			return errTypeMismatch
+		}
+		data = v.Data
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
 		return nil, ErrNotFound
 	}
-	v, ok := e.(*store.ValueStructure)
-	if !ok {
-		return nil, errTypeMismatch
-	}
-	return [][]byte{v.Data}, nil
+	return [][]byte{data}, nil
 }
 
 // -- set ops --
 
-func execSAdd(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execSAdd(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	member := string(args[argSAddMember])
-	ttl := decodeTTL(args, argSAddTTL)
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		return applyAdd(ds, member, ttl)
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
+		return applyAdd(ds, member)
 	})
 }
 
-func execSRem(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execSRem(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	member := string(args[argSRemMember])
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
 		if ds == nil {
 			return nil, nil
 		}
@@ -193,27 +289,41 @@ func execSRem(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 	})
 }
 
-func execSIsMember(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execSIsMember(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	member := string(args[argSIsMemberMember])
 	var result bool
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if ss, ok := ds.(*store.SetStructure); ok {
 			result = ss.IsMember(member)
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	if result {
 		return [][]byte{{1}}, nil
 	}
 	return [][]byte{{0}}, nil
 }
 
-func execSMembers(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
+func execSMembers(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
 	var members []string
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if ss, ok := ds.(*store.SetStructure); ok {
 			members = ss.Members()
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	out := make([][]byte, len(members))
 	for i, m := range members {
 		out[i] = []byte(m)
@@ -221,60 +331,63 @@ func execSMembers(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	return out, nil
 }
 
-func execSCard(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
+func execSCard(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
 	var count int
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if ss, ok := ds.(*store.SetStructure); ok {
 			count = ss.Card()
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	return [][]byte{encodeUint64(uint64(count))}, nil
-}
-
-func execSExpireMember(m *Cluster, key string, args [][]byte) ([][]byte, error) {
-	member := string(args[argSExpireMember])
-	ttl := decodeTTL(args, argSExpireTTL)
-	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		if ds == nil {
-			return nil, nil
-		}
-		ss, ok := ds.(*store.SetStructure)
-		if !ok {
-			return nil, errNotASet
-		}
-		ss.ExpireMember(member, ttl)
-		return ss, nil
-	})
 }
 
 // -- hash ops --
 
-func execHSet(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execHSet(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	field := string(args[argHSetField])
 	data := args[argHSetData]
-	ttl := decodeTTL(args, argHSetTTL)
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		return applyHSet(ds, field, data, ttl)
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
+		return applyHSet(ds, field, data)
 	})
 }
 
-func execHGet(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execHGet(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	field := string(args[argHGetField])
 	var data []byte
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if h, ok := ds.(*store.HashStructure); ok {
 			data, _ = h.HGet(field)
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	if data == nil {
 		return nil, ErrNotFound
 	}
 	return [][]byte{data}, nil
 }
 
-func execHDel(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execHDel(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	field := string(args[argHDelField])
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
 		if ds == nil {
 			return nil, nil
 		}
@@ -287,23 +400,37 @@ func execHDel(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 	})
 }
 
-func execHGetAll(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
+func execHGetAll(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
 	var out [][]byte
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if h, ok := ds.(*store.HashStructure); ok {
 			out = h.AppendAll(make([][]byte, 0, h.Len()*2))
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-func execHKeys(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
+func execHKeys(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
 	var fields []string
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if h, ok := ds.(*store.HashStructure); ok {
 			fields = h.Fields()
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	out := make([][]byte, len(fields))
 	for i, f := range fields {
 		out[i] = []byte(f)
@@ -311,26 +438,10 @@ func execHKeys(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	return out, nil
 }
 
-func execHExpireField(m *Cluster, key string, args [][]byte) ([][]byte, error) {
-	field := string(args[argHExpireField])
-	ttl := decodeTTL(args, argHExpireFieldTTL)
-	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		if ds == nil {
-			return nil, nil
-		}
-		h, ok := ds.(*store.HashStructure)
-		if !ok {
-			return nil, errNotAHash
-		}
-		h.ExpireField(field, ttl)
-		return h, nil
-	})
-}
-
 // -- apply helpers --
 
 // applyHSet upserts field into a HashStructure, creating one if ds is nil.
-func applyHSet(ds store.DataStructure, field string, data []byte, ttl time.Duration) (store.DataStructure, error) {
+func applyHSet(ds store.DataStructure, field string, data []byte) (store.DataStructure, error) {
 	var h *store.HashStructure
 	if ds == nil {
 		h = store.NewHashStructure()
@@ -341,16 +452,12 @@ func applyHSet(ds store.DataStructure, field string, data []byte, ttl time.Durat
 			return nil, errNotAHash
 		}
 	}
-	if ttl > 0 {
-		h.HSetWithTTL(field, data, ttl)
-	} else {
-		h.HSet(field, data)
-	}
+	h.HSet(field, data)
 	return h, nil
 }
 
 // applyAdd adds member to a SetStructure, creating one if ds is nil.
-func applyAdd(ds store.DataStructure, member string, ttl time.Duration) (store.DataStructure, error) {
+func applyAdd(ds store.DataStructure, member string) (store.DataStructure, error) {
 	var ss *store.SetStructure
 	if ds == nil {
 		ss = store.NewSetStructure()
@@ -361,11 +468,7 @@ func applyAdd(ds store.DataStructure, member string, ttl time.Duration) (store.D
 			return nil, errNotASet
 		}
 	}
-	if ttl > 0 {
-		ss.AddWithTTL(member, ttl)
-	} else {
-		ss.Add(member)
-	}
+	ss.Add(member)
 	return ss, nil
 }
 
@@ -383,6 +486,20 @@ func decodeTTL(args [][]byte, idx int) time.Duration {
 // encodeUint64 encodes n as an 8-byte big-endian slice.
 func encodeUint64(n uint64) []byte {
 	return binary.BigEndian.AppendUint64(nil, n)
+}
+
+// encodeUint32 encodes n as a 4-byte big-endian slice.
+func encodeUint32(n uint32) []byte {
+	return binary.BigEndian.AppendUint32(nil, n)
+}
+
+// decodeUint32 decodes a 4-byte big-endian uint32 from args[idx].
+// Returns 0 if the slot is absent or too short.
+func decodeUint32(args [][]byte, idx int) uint32 {
+	if idx >= len(args) || len(args[idx]) < 4 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(args[idx])
 }
 
 // encodeFloat64 encodes f as an 8-byte IEEE 754 big-endian slice.
@@ -406,8 +523,11 @@ func decodeInt64(args [][]byte, idx int) int64 {
 
 // -- list ops --
 
-func execLPush(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execLPush(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
 		l := asOrNewList(ds)
 		if l == nil {
 			return nil, errNotAList
@@ -417,8 +537,11 @@ func execLPush(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 	})
 }
 
-func execRPush(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execRPush(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
 		l := asOrNewList(ds)
 		if l == nil {
 			return nil, errNotAList
@@ -428,9 +551,12 @@ func execRPush(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 	})
 }
 
-func execLPop(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
+func execLPop(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
 	var popped []byte
 	err := m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
 		if ds == nil {
 			return nil, nil
 		}
@@ -454,9 +580,12 @@ func execLPop(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	return [][]byte{popped}, nil
 }
 
-func execRPop(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
+func execRPop(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
 	var popped []byte
 	err := m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
 		if ds == nil {
 			return nil, nil
 		}
@@ -480,47 +609,71 @@ func execRPop(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	return [][]byte{popped}, nil
 }
 
-func execLLen(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
+func execLLen(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
 	var count int
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if l, ok := ds.(*store.ListStructure); ok {
 			count = l.Len()
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	return [][]byte{encodeUint64(uint64(count))}, nil
 }
 
-func execLIndex(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execLIndex(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	idx := int(decodeInt64(args, argLIndexIndex))
 	var data []byte
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if l, ok := ds.(*store.ListStructure); ok {
 			data, _ = l.Index(idx)
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	if data == nil {
 		return nil, ErrNotFound
 	}
 	return [][]byte{data}, nil
 }
 
-func execLRange(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execLRange(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	start := int(decodeInt64(args, argLRangeStart))
 	stop := int(decodeInt64(args, argLRangeStop))
 	var items [][]byte
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if l, ok := ds.(*store.ListStructure); ok {
 			items = l.Range(start, stop)
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
-func execLSet(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execLSet(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	idx := int(decodeInt64(args, argLSetIndex))
 	data := args[argLSetData]
 	var found bool
 	err := m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
 		if ds == nil {
 			return nil, nil
 		}
@@ -555,10 +708,13 @@ func asOrNewList(ds store.DataStructure) *store.ListStructure {
 
 // -- zset ops --
 
-func execZAdd(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execZAdd(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	score := decodeFloat64(args[argZAddScore])
 	member := string(args[argZAddMember])
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
 		z := asOrNewZSet(ds)
 		if z == nil {
 			return nil, errNotAZSet
@@ -568,9 +724,12 @@ func execZAdd(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 	})
 }
 
-func execZRem(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execZRem(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	member := string(args[argZRemMember])
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
 		if ds == nil {
 			return nil, nil
 		}
@@ -583,86 +742,128 @@ func execZRem(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 	})
 }
 
-func execZScore(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execZScore(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	member := string(args[argZScoreMember])
 	var score float64
 	var found bool
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if z, ok := ds.(*store.ZSetStructure); ok {
 			score, found = z.ZScore(member)
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	if !found {
 		return nil, ErrNotFound
 	}
 	return [][]byte{encodeFloat64(score)}, nil
 }
 
-func execZRank(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execZRank(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	member := string(args[argZRankMember])
 	var rank int
 	var found bool
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if z, ok := ds.(*store.ZSetStructure); ok {
 			rank, found = z.ZRank(member)
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	if !found {
 		return nil, ErrNotFound
 	}
 	return [][]byte{encodeUint64(uint64(rank))}, nil
 }
 
-func execZRevRank(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execZRevRank(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	member := string(args[argZRevRankMember])
 	var rank int
 	var found bool
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if z, ok := ds.(*store.ZSetStructure); ok {
 			rank, found = z.ZRevRank(member)
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	if !found {
 		return nil, ErrNotFound
 	}
 	return [][]byte{encodeUint64(uint64(rank))}, nil
 }
 
-func execZCard(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
+func execZCard(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
 	var count int
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if z, ok := ds.(*store.ZSetStructure); ok {
 			count = z.ZCard()
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	return [][]byte{encodeUint64(uint64(count))}, nil
 }
 
-func execZRange(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execZRange(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	start := int(decodeInt64(args, argZRangeStart))
 	stop := int(decodeInt64(args, argZRangeStop))
 	var out [][]byte
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if z, ok := ds.(*store.ZSetStructure); ok {
 			for _, e := range z.ZRange(start, stop) {
 				out = append(out, []byte(e.Member), encodeFloat64(e.Score))
 			}
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-func execZRangeByScore(m *Cluster, key string, args [][]byte) ([][]byte, error) {
+func execZRangeByScore(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
 	min := decodeFloat64(args[argZRangeByScoreMin])
 	max := decodeFloat64(args[argZRangeByScoreMax])
 	var out [][]byte
-	m.store.Read(key, func(ds store.DataStructure) {
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
 		if z, ok := ds.(*store.ZSetStructure); ok {
 			for _, e := range z.ZRangeByScore(min, max) {
 				out = append(out, []byte(e.Member), encodeFloat64(e.Score))
 			}
 		}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

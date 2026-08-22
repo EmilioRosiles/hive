@@ -171,6 +171,34 @@ func TestHandleRebalance_WithTTL_SetsExpiry(t *testing.T) {
 	}
 }
 
+func TestHandleRebalance_PreservesLockState(t *testing.T) {
+	m := newTestCluster("self")
+
+	// A locked entry is just a ValueStructure with lock fields set.
+	vs := store.NewValueStructure([]byte("v"))
+	vs.SetLock(42, uint32(time.Now().Add(time.Hour).Unix()))
+	data, err := vs.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	batch := transport.RebalanceBatch{Entries: []transport.RebalanceEntry{
+		{Key: "k1", Kind: uint8(store.KindValue), Data: data},
+	}}
+	payload, _ := transport.Encode(batch)
+	if _, err := m.handleRebalance(payload); err != nil {
+		t.Fatalf("handleRebalance: %v", err)
+	}
+
+	e, ok := m.store.Get("k1")
+	if !ok {
+		t.Fatal("k1 should be present after rebalance")
+	}
+	if e.LockToken() != 42 || e.LockExpiry() == 0 {
+		t.Errorf("lock state should have migrated along with the entry: got token=%d expiry=%d", e.LockToken(), e.LockExpiry())
+	}
+}
+
 func TestHandleRebalance_ExpiredInTransit_Skipped(t *testing.T) {
 	m := newTestCluster("self")
 

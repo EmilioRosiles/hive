@@ -43,13 +43,6 @@ func TestValueEncode(t *testing.T) {
 	}
 }
 
-func TestValueCleanupAlwaysFalse(t *testing.T) {
-	v := NewValueStructure([]byte("v"))
-	if v.Cleanup(time.Now()) {
-		t.Error("Cleanup: plain value should never report empty")
-	}
-}
-
 func TestValueKeyExpiry(t *testing.T) {
 	v := NewValueStructure([]byte("v"))
 	if v.KeyExpiry() != 0 {
@@ -70,7 +63,7 @@ func TestNewValueStructureWithTTL(t *testing.T) {
 	if v.KeyExpiry() == 0 {
 		t.Error("NewValueStructureWithTTL: expiry should be set")
 	}
-	if v.KeyExpiry() <= time.Now().Unix() {
+	if v.KeyExpiry() <= uint32(time.Now().Unix()) {
 		t.Error("NewValueStructureWithTTL: expiry should be in the future")
 	}
 }

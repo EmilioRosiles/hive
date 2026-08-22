@@ -18,11 +18,12 @@
 //	sessions := hive.NewValueStore[Session](cluster, "sessions")
 //	users    := hive.NewValueStore[User](cluster, "users")
 //
-//	sessions.Set("abc", mySession)
-//	val, err := sessions.Get("abc")
+//	sessions.Set(ctx, "abc", mySession)
+//	val, err := sessions.Get(ctx, "abc")
 package hive
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"log/slog"
@@ -146,8 +147,8 @@ type Cluster struct {
 
 // exec routes an op through the cluster and returns raw result slots.
 // Store files call this directly — no intermediate Manager methods.
-func (c *Cluster) exec(op transport.Op, key string, args ...[]byte) ([][]byte, error) {
-	return c.internal.Exec(op, key, args...)
+func (c *Cluster) exec(ctx context.Context, op transport.Op, key string, args ...[]byte) ([][]byte, error) {
+	return c.internal.Exec(ctx, op, key, args...)
 }
 
 // Member is a point-in-time snapshot of one cluster member as seen by this

@@ -3,7 +3,6 @@ package store
 import (
 	"sort"
 	"testing"
-	"time"
 )
 
 func TestHashHSetAndHGet(t *testing.T) {
@@ -25,22 +24,12 @@ func TestHashHGetMissingField(t *testing.T) {
 	}
 }
 
-func TestHashHSetClearsTTL(t *testing.T) {
+func TestHashHSetOverwrites(t *testing.T) {
 	h := NewHashStructure()
-	h.HSetWithTTL("f", []byte("v"), 10*time.Millisecond)
-	h.HSet("f", []byte("v")) // re-set without TTL
-	time.Sleep(20 * time.Millisecond)
-	if _, ok := h.HGet("f"); !ok {
-		t.Error("HSet after HSetWithTTL should clear TTL; field should still exist")
-	}
-}
-
-func TestHashHSetWithTTLExpires(t *testing.T) {
-	h := NewHashStructure()
-	h.HSetWithTTL("f", []byte("v"), 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
-	if _, ok := h.HGet("f"); ok {
-		t.Error("HGet: field should have expired")
+	h.HSet("f", []byte("old"))
+	h.HSet("f", []byte("new"))
+	if data, ok := h.HGet("f"); !ok || string(data) != "new" {
+		t.Errorf("HGet after overwrite: got %q ok=%v, want new true", data, ok)
 	}
 }
 
@@ -62,8 +51,6 @@ func TestHashFields(t *testing.T) {
 	h := NewHashStructure()
 	h.HSet("a", []byte("1"))
 	h.HSet("b", []byte("2"))
-	h.HSetWithTTL("expired", []byte("x"), 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
 
 	fields := h.Fields()
 	sort.Strings(fields)
@@ -76,11 +63,9 @@ func TestHashAppendAll(t *testing.T) {
 	h := NewHashStructure()
 	h.HSet("a", []byte("1"))
 	h.HSet("b", []byte("2"))
-	h.HSetWithTTL("expired", []byte("x"), 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
 
 	pairs := h.AppendAll(nil)
-	if len(pairs) != 4 { // 2 live fields × (name + value)
+	if len(pairs) != 4 { // 2 fields × (name + value)
 		t.Errorf("AppendAll: got %d elements, want 4", len(pairs))
 	}
 	// Build a map from the pairs to check values regardless of iteration order.
@@ -93,53 +78,12 @@ func TestHashAppendAll(t *testing.T) {
 	}
 }
 
-func TestHashExpireField(t *testing.T) {
-	h := NewHashStructure()
-	h.HSet("f", []byte("v"))
-	h.ExpireField("f", 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
-	if _, ok := h.HGet("f"); ok {
-		t.Error("ExpireField: field should have expired")
-	}
-}
-
-func TestHashExpireFieldMissingIsNoOp(t *testing.T) {
-	h := NewHashStructure()
-	h.ExpireField("nonexistent", time.Second) // should not panic
-}
-
 func TestHashLen(t *testing.T) {
 	h := NewHashStructure()
 	h.HSet("a", []byte("1"))
 	h.HSet("b", []byte("2"))
 	if h.Len() != 2 {
 		t.Errorf("Len: got %d, want 2", h.Len())
-	}
-}
-
-func TestHashCleanupRemovesExpiredFields(t *testing.T) {
-	h := NewHashStructure()
-	h.HSet("live", []byte("v"))
-	h.HSetWithTTL("dead", []byte("v"), 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
-
-	empty := h.Cleanup(time.Now())
-	if empty {
-		t.Error("Cleanup: hash should not be empty — live field remains")
-	}
-	if _, ok := h.HGet("dead"); ok {
-		t.Error("Cleanup: expired field should be removed")
-	}
-}
-
-func TestHashCleanupReportsEmptyWhenAllExpired(t *testing.T) {
-	h := NewHashStructure()
-	h.HSetWithTTL("a", []byte("v"), 10*time.Millisecond)
-	h.HSetWithTTL("b", []byte("v"), 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
-
-	if empty := h.Cleanup(time.Now()); !empty {
-		t.Error("Cleanup: should report empty when all fields have expired")
 	}
 }
 
@@ -150,7 +94,7 @@ func TestHashByteSize(t *testing.T) {
 		t.Errorf("ByteSize: empty hash should be %d, got %d", emptyWant, got)
 	}
 	h.HSet("field", []byte("data"))
-	want := int64(len("field")+len("data")) + mapEntryOverhead + mtimeSize + keyExpirySize
+	want := int64(len("field")+len("data")) + mapBucketOverhead + mtimeSize + keyExpirySize
 	if got := h.ByteSize(); got != want {
 		t.Errorf("ByteSize: got %d, want %d", got, want)
 	}
