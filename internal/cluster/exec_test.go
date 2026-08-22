@@ -82,7 +82,7 @@ func TestExecExpire_SetsExpiry(t *testing.T) {
 func TestExecSAdd_AddsMember(t *testing.T) {
 	m := newTestCluster("self")
 
-	execSAdd(m, "s", [][]byte{[]byte("alice"), nil})
+	execSAdd(m, "s", [][]byte{[]byte("alice")})
 
 	results, _ := execSMembers(m, "s", nil)
 	if len(results) != 1 || string(results[0]) != "alice" {
@@ -90,23 +90,10 @@ func TestExecSAdd_AddsMember(t *testing.T) {
 	}
 }
 
-func TestExecSAdd_WithTTL_MemberExpires(t *testing.T) {
-	m := newTestCluster("self")
-	execSAdd(m, "s", [][]byte{[]byte("bob"), ttlArg(50 * time.Millisecond)})
-
-	time.Sleep(80 * time.Millisecond)
-	results, _ := execSMembers(m, "s", nil)
-	for _, r := range results {
-		if string(r) == "bob" {
-			t.Error("TTL-expired member should not be returned")
-		}
-	}
-}
-
 func TestExecSRem_RemovesMember(t *testing.T) {
 	m := newTestCluster("self")
-	execSAdd(m, "s", [][]byte{[]byte("alice"), nil})
-	execSAdd(m, "s", [][]byte{[]byte("bob"), nil})
+	execSAdd(m, "s", [][]byte{[]byte("alice")})
+	execSAdd(m, "s", [][]byte{[]byte("bob")})
 
 	execSRem(m, "s", [][]byte{[]byte("alice")})
 
@@ -120,7 +107,7 @@ func TestExecSRem_RemovesMember(t *testing.T) {
 
 func TestExecSIsMember_Present(t *testing.T) {
 	m := newTestCluster("self")
-	execSAdd(m, "s", [][]byte{[]byte("alice"), nil})
+	execSAdd(m, "s", [][]byte{[]byte("alice")})
 
 	results, _ := execSIsMember(m, "s", [][]byte{[]byte("alice")})
 	if len(results) == 0 || results[0][0] != 1 {
@@ -139,9 +126,9 @@ func TestExecSIsMember_Absent(t *testing.T) {
 
 func TestExecSCard_ReturnsCount(t *testing.T) {
 	m := newTestCluster("self")
-	execSAdd(m, "s", [][]byte{[]byte("a"), nil})
-	execSAdd(m, "s", [][]byte{[]byte("b"), nil})
-	execSAdd(m, "s", [][]byte{[]byte("c"), nil})
+	execSAdd(m, "s", [][]byte{[]byte("a")})
+	execSAdd(m, "s", [][]byte{[]byte("b")})
+	execSAdd(m, "s", [][]byte{[]byte("c")})
 
 	results, _ := execSCard(m, "s", nil)
 	count := decodeUint64(results[0])
@@ -150,25 +137,12 @@ func TestExecSCard_ReturnsCount(t *testing.T) {
 	}
 }
 
-func TestExecSExpireMember_ExpiresMember(t *testing.T) {
-	m := newTestCluster("self")
-	execSAdd(m, "s", [][]byte{[]byte("alice"), nil})
-
-	execSExpireMember(m, "s", [][]byte{[]byte("alice"), ttlArg(50 * time.Millisecond)})
-
-	time.Sleep(80 * time.Millisecond)
-	results, _ := execSIsMember(m, "s", [][]byte{[]byte("alice")})
-	if results[0][0] != 0 {
-		t.Error("alice should have expired after execSExpireMember TTL")
-	}
-}
-
 // -- hash ops --
 
 func TestExecHSet_StoresField(t *testing.T) {
 	m := newTestCluster("self")
 
-	execHSet(m, "h", [][]byte{[]byte("field"), []byte("value"), nil})
+	execHSet(m, "h", [][]byte{[]byte("field"), []byte("value")})
 
 	results, err := execHGet(m, "h", [][]byte{[]byte("field")})
 	if err != nil {
@@ -176,16 +150,6 @@ func TestExecHSet_StoresField(t *testing.T) {
 	}
 	if string(results[0]) != "value" {
 		t.Errorf("got %q, want value", results[0])
-	}
-}
-
-func TestExecHSet_WithTTL_FieldExpires(t *testing.T) {
-	m := newTestCluster("self")
-	execHSet(m, "h", [][]byte{[]byte("f"), []byte("v"), ttlArg(50 * time.Millisecond)})
-
-	time.Sleep(80 * time.Millisecond)
-	if _, err := execHGet(m, "h", [][]byte{[]byte("f")}); err != ErrNotFound {
-		t.Error("TTL-expired field should not be retrievable")
 	}
 }
 
@@ -199,7 +163,7 @@ func TestExecHGet_MissingField_ReturnsNotFound(t *testing.T) {
 
 func TestExecHDel_RemovesField(t *testing.T) {
 	m := newTestCluster("self")
-	execHSet(m, "h", [][]byte{[]byte("f"), []byte("v"), nil})
+	execHSet(m, "h", [][]byte{[]byte("f"), []byte("v")})
 
 	execHDel(m, "h", [][]byte{[]byte("f")})
 
@@ -210,8 +174,8 @@ func TestExecHDel_RemovesField(t *testing.T) {
 
 func TestExecHGetAll_ReturnsAllFields(t *testing.T) {
 	m := newTestCluster("self")
-	execHSet(m, "h", [][]byte{[]byte("f1"), []byte("v1"), nil})
-	execHSet(m, "h", [][]byte{[]byte("f2"), []byte("v2"), nil})
+	execHSet(m, "h", [][]byte{[]byte("f1"), []byte("v1")})
+	execHSet(m, "h", [][]byte{[]byte("f2"), []byte("v2")})
 
 	results, err := execHGetAll(m, "h", nil)
 	if err != nil {
@@ -225,8 +189,8 @@ func TestExecHGetAll_ReturnsAllFields(t *testing.T) {
 
 func TestExecHKeys_ReturnsFieldNames(t *testing.T) {
 	m := newTestCluster("self")
-	execHSet(m, "h", [][]byte{[]byte("alpha"), []byte("1"), nil})
-	execHSet(m, "h", [][]byte{[]byte("beta"), []byte("2"), nil})
+	execHSet(m, "h", [][]byte{[]byte("alpha"), []byte("1")})
+	execHSet(m, "h", [][]byte{[]byte("beta"), []byte("2")})
 
 	results, err := execHKeys(m, "h", nil)
 	if err != nil {
@@ -234,18 +198,6 @@ func TestExecHKeys_ReturnsFieldNames(t *testing.T) {
 	}
 	if len(results) != 2 {
 		t.Errorf("expected 2 field names, got %d", len(results))
-	}
-}
-
-func TestExecHExpireField_ExpiresField(t *testing.T) {
-	m := newTestCluster("self")
-	execHSet(m, "h", [][]byte{[]byte("f"), []byte("v"), nil})
-
-	execHExpireField(m, "h", [][]byte{[]byte("f"), ttlArg(50 * time.Millisecond)})
-
-	time.Sleep(80 * time.Millisecond)
-	if _, err := execHGet(m, "h", [][]byte{[]byte("f")}); err != ErrNotFound {
-		t.Error("field should have expired after execHExpireField TTL")
 	}
 }
 

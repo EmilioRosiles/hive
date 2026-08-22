@@ -39,19 +39,17 @@ var opRegistry = map[transport.Op]opDef{
 	transport.OpValueSet: {Exec: execValueSet, Scope: ScopeWrite},
 	transport.OpValueGet: {Exec: execValueGet, Scope: ScopeRead},
 
-	transport.OpSAdd:          {Exec: execSAdd, Scope: ScopeWrite},
-	transport.OpSRem:          {Exec: execSRem, Scope: ScopeWrite},
-	transport.OpSIsMember:     {Exec: execSIsMember, Scope: ScopeRead},
-	transport.OpSMembers:      {Exec: execSMembers, Scope: ScopeRead},
-	transport.OpSCard:         {Exec: execSCard, Scope: ScopeRead},
-	transport.OpSExpireMember: {Exec: execSExpireMember, Scope: ScopeWrite},
+	transport.OpSAdd:      {Exec: execSAdd, Scope: ScopeWrite},
+	transport.OpSRem:      {Exec: execSRem, Scope: ScopeWrite},
+	transport.OpSIsMember: {Exec: execSIsMember, Scope: ScopeRead},
+	transport.OpSMembers:  {Exec: execSMembers, Scope: ScopeRead},
+	transport.OpSCard:     {Exec: execSCard, Scope: ScopeRead},
 
-	transport.OpHSet:         {Exec: execHSet, Scope: ScopeWrite},
-	transport.OpHGet:         {Exec: execHGet, Scope: ScopeRead},
-	transport.OpHDel:         {Exec: execHDel, Scope: ScopeWrite},
-	transport.OpHGetAll:      {Exec: execHGetAll, Scope: ScopeRead},
-	transport.OpHKeys:        {Exec: execHKeys, Scope: ScopeRead},
-	transport.OpHExpireField: {Exec: execHExpireField, Scope: ScopeWrite},
+	transport.OpHSet:    {Exec: execHSet, Scope: ScopeWrite},
+	transport.OpHGet:    {Exec: execHGet, Scope: ScopeRead},
+	transport.OpHDel:    {Exec: execHDel, Scope: ScopeWrite},
+	transport.OpHGetAll: {Exec: execHGetAll, Scope: ScopeRead},
+	transport.OpHKeys:   {Exec: execHKeys, Scope: ScopeRead},
 
 	transport.OpLPush:  {Exec: execLPush, Scope: ScopeWrite},
 	transport.OpRPush:  {Exec: execRPush, Scope: ScopeWrite},
@@ -115,27 +113,19 @@ const (
 
 const (
 	argSAddMember = 0 // string
-	argSAddTTL    = 1 // int64 ns big-endian; absent = no expiry
 
 	argSRemMember = 0 // string
 
 	argSIsMemberMember = 0 // string
-
-	argSExpireMember = 0 // string
-	argSExpireTTL    = 1 // int64 ns big-endian
 )
 
 const (
 	argHSetField = 0 // string
 	argHSetData  = 1 // []byte
-	argHSetTTL   = 2 // int64 ns big-endian; absent = no expiry
 
 	argHGetField = 0 // string
 
 	argHDelField = 0 // string
-
-	argHExpireField    = 0 // string
-	argHExpireFieldTTL = 1 // int64 ns big-endian
 )
 
 // -- shared ops --
@@ -172,9 +162,8 @@ func execValueGet(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 
 func execSAdd(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 	member := string(args[argSAddMember])
-	ttl := decodeTTL(args, argSAddTTL)
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		return applyAdd(ds, member, ttl)
+		return applyAdd(ds, member)
 	})
 }
 
@@ -231,30 +220,13 @@ func execSCard(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	return [][]byte{encodeUint64(uint64(count))}, nil
 }
 
-func execSExpireMember(m *Cluster, key string, args [][]byte) ([][]byte, error) {
-	member := string(args[argSExpireMember])
-	ttl := decodeTTL(args, argSExpireTTL)
-	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		if ds == nil {
-			return nil, nil
-		}
-		ss, ok := ds.(*store.SetStructure)
-		if !ok {
-			return nil, errNotASet
-		}
-		ss.ExpireMember(member, ttl)
-		return ss, nil
-	})
-}
-
 // -- hash ops --
 
 func execHSet(m *Cluster, key string, args [][]byte) ([][]byte, error) {
 	field := string(args[argHSetField])
 	data := args[argHSetData]
-	ttl := decodeTTL(args, argHSetTTL)
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		return applyHSet(ds, field, data, ttl)
+		return applyHSet(ds, field, data)
 	})
 }
 
@@ -311,26 +283,10 @@ func execHKeys(m *Cluster, key string, _ [][]byte) ([][]byte, error) {
 	return out, nil
 }
 
-func execHExpireField(m *Cluster, key string, args [][]byte) ([][]byte, error) {
-	field := string(args[argHExpireField])
-	ttl := decodeTTL(args, argHExpireFieldTTL)
-	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		if ds == nil {
-			return nil, nil
-		}
-		h, ok := ds.(*store.HashStructure)
-		if !ok {
-			return nil, errNotAHash
-		}
-		h.ExpireField(field, ttl)
-		return h, nil
-	})
-}
-
 // -- apply helpers --
 
 // applyHSet upserts field into a HashStructure, creating one if ds is nil.
-func applyHSet(ds store.DataStructure, field string, data []byte, ttl time.Duration) (store.DataStructure, error) {
+func applyHSet(ds store.DataStructure, field string, data []byte) (store.DataStructure, error) {
 	var h *store.HashStructure
 	if ds == nil {
 		h = store.NewHashStructure()
@@ -341,16 +297,12 @@ func applyHSet(ds store.DataStructure, field string, data []byte, ttl time.Durat
 			return nil, errNotAHash
 		}
 	}
-	if ttl > 0 {
-		h.HSetWithTTL(field, data, ttl)
-	} else {
-		h.HSet(field, data)
-	}
+	h.HSet(field, data)
 	return h, nil
 }
 
 // applyAdd adds member to a SetStructure, creating one if ds is nil.
-func applyAdd(ds store.DataStructure, member string, ttl time.Duration) (store.DataStructure, error) {
+func applyAdd(ds store.DataStructure, member string) (store.DataStructure, error) {
 	var ss *store.SetStructure
 	if ds == nil {
 		ss = store.NewSetStructure()
@@ -361,11 +313,7 @@ func applyAdd(ds store.DataStructure, member string, ttl time.Duration) (store.D
 			return nil, errNotASet
 		}
 	}
-	if ttl > 0 {
-		ss.AddWithTTL(member, ttl)
-	} else {
-		ss.Add(member)
-	}
+	ss.Add(member)
 	return ss, nil
 }
 

@@ -1,8 +1,6 @@
 package store
 
 import (
-	"time"
-
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -140,9 +138,6 @@ func (l *ListStructure) Range(start, stop int) [][]byte {
 	}
 	return out
 }
-
-// Cleanup is a no-op — list elements do not independently expire.
-func (l *ListStructure) Cleanup(_ time.Time) bool { return false }
 
 // resolveListIndex normalises a possibly-negative index into an absolute
 // position. Returns (pos, true) on success or (0, false) if out of bounds.

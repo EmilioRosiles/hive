@@ -43,13 +43,6 @@ func TestValueEncode(t *testing.T) {
 	}
 }
 
-func TestValueCleanupAlwaysFalse(t *testing.T) {
-	v := NewValueStructure([]byte("v"))
-	if v.Cleanup(time.Now()) {
-		t.Error("Cleanup: plain value should never report empty")
-	}
-}
-
 func TestValueKeyExpiry(t *testing.T) {
 	v := NewValueStructure([]byte("v"))
 	if v.KeyExpiry() != 0 {

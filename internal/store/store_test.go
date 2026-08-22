@@ -374,26 +374,6 @@ func TestDeleteExpiredRemovesExpiredEntries(t *testing.T) {
 	}
 }
 
-func TestDeleteExpiredRemovesEmptySet(t *testing.T) {
-	ds := NewDataStore(unlimited)
-
-	err := ds.Apply("s", func(_ DataStructure) (DataStructure, error) {
-		ss := NewSetStructure()
-		ss.AddWithTTL("member", 10*time.Millisecond)
-		return ss, nil
-	})
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	time.Sleep(20 * time.Millisecond)
-	ds.DeleteExpired()
-
-	if _, ok := ds.Get("s"); ok {
-		t.Error("DeleteExpired: set with all-expired members should be removed")
-	}
-}
-
 // -- ApplyIfNewer --
 
 func TestApplyIfNewer_NoExisting_Stores(t *testing.T) {

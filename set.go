@@ -12,7 +12,7 @@ import (
 //
 //	online := hive.NewSetStore(cluster, "online_users")
 //	online.SAdd(ctx, "room:1", "user:123")
-//	online.SExpireMember(ctx, "room:1", "user:123", 30*time.Second)
+//	online.Expire(ctx, "room:1", 30*time.Second)
 type SetStore struct {
 	cluster *Cluster
 	prefix  string
@@ -24,7 +24,7 @@ func NewSetStore(cluster *Cluster, name string) *SetStore {
 	return &SetStore{cluster: cluster, prefix: name + ":s:"}
 }
 
-// SAdd adds member to the set at key with no expiry.
+// SAdd adds member to the set at key.
 func (s *SetStore) SAdd(ctx context.Context, key, member string) error {
 	_, err := s.cluster.exec(ctx, transport.OpSAdd, s.prefix+key, []byte(member))
 	return err
@@ -36,7 +36,7 @@ func (s *SetStore) SRem(ctx context.Context, key, member string) error {
 	return err
 }
 
-// SIsMember reports whether member exists in the set at key and has not expired.
+// SIsMember reports whether member exists in the set at key.
 func (s *SetStore) SIsMember(ctx context.Context, key, member string) (bool, error) {
 	results, err := s.cluster.exec(ctx, transport.OpSIsMember, s.prefix+key, []byte(member))
 	if err != nil {
@@ -45,7 +45,7 @@ func (s *SetStore) SIsMember(ctx context.Context, key, member string) (bool, err
 	return results[0][0] == 1, nil
 }
 
-// SMembers returns all live members of the set at key.
+// SMembers returns all members of the set at key.
 func (s *SetStore) SMembers(ctx context.Context, key string) ([]string, error) {
 	results, err := s.cluster.exec(ctx, transport.OpSMembers, s.prefix+key)
 	if err != nil {
@@ -58,7 +58,7 @@ func (s *SetStore) SMembers(ctx context.Context, key string) ([]string, error) {
 	return out, nil
 }
 
-// SCard returns the number of live members in the set at key.
+// SCard returns the number of members in the set at key.
 func (s *SetStore) SCard(ctx context.Context, key string) (int, error) {
 	results, err := s.cluster.exec(ctx, transport.OpSCard, s.prefix+key)
 	if err != nil {
@@ -76,12 +76,5 @@ func (s *SetStore) Del(ctx context.Context, key string) error {
 // Expire sets a key-level TTL. The entire set is deleted after ttl elapses.
 func (s *SetStore) Expire(ctx context.Context, key string, ttl time.Duration) error {
 	_, err := s.cluster.exec(ctx, transport.OpExpire, s.prefix+key, encodeTTL(ttl))
-	return err
-}
-
-// SExpireMember sets a TTL on a single member. The member is evicted after ttl
-// elapses without affecting other members or the key itself.
-func (s *SetStore) SExpireMember(ctx context.Context, key, member string, ttl time.Duration) error {
-	_, err := s.cluster.exec(ctx, transport.OpSExpireMember, s.prefix+key, []byte(member), encodeTTL(ttl))
 	return err
 }

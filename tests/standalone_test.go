@@ -135,27 +135,6 @@ func TestSetStore_Remove(t *testing.T) {
 	}
 }
 
-func TestSetStore_MemberExpiry(t *testing.T) {
-	cache := standalone(t)
-	store := hive.NewSetStore(cache, "online")
-
-	store.SAdd(t.Context(), "room:1", "user:1")
-	store.SAdd(t.Context(), "room:1", "user:2")
-	store.SExpireMember(t.Context(), "room:1", "user:1", 1100*time.Millisecond)
-
-	time.Sleep(1300 * time.Millisecond)
-
-	// user:1 expired, user:2 still alive
-	ok, _ := store.SIsMember(t.Context(), "room:1", "user:1")
-	if ok {
-		t.Fatal("expired member still present")
-	}
-	ok, _ = store.SIsMember(t.Context(), "room:1", "user:2")
-	if !ok {
-		t.Fatal("non-expired member missing")
-	}
-}
-
 func TestSetStore_KeyExpiry(t *testing.T) {
 	cache := standalone(t)
 	store := hive.NewSetStore(cache, "online")
@@ -233,40 +212,6 @@ func TestHashStore_DelField(t *testing.T) {
 	// stream:b should still be there
 	if _, err := store.HGet(t.Context(), "user:1", "stream:b"); err != nil {
 		t.Fatalf("HGet remaining field: %v", err)
-	}
-}
-
-func TestHashStore_FieldExpiry(t *testing.T) {
-	cache := standalone(t)
-	store := hive.NewHashStore[Stream](cache, "streams")
-
-	store.HSet(t.Context(), "user:1", "stream:a", Stream{BitRate: 720})
-	store.HSet(t.Context(), "user:1", "stream:b", Stream{BitRate: 1080})
-	store.HExpireField(t.Context(), "user:1", "stream:a", 1100*time.Millisecond)
-
-	time.Sleep(1300 * time.Millisecond)
-
-	_, err := store.HGet(t.Context(), "user:1", "stream:a")
-	if !errors.Is(err, hive.ErrNotFound) {
-		t.Fatalf("expired field still present: %v", err)
-	}
-	// stream:b unaffected
-	if _, err := store.HGet(t.Context(), "user:1", "stream:b"); err != nil {
-		t.Fatalf("non-expired field missing: %v", err)
-	}
-}
-
-func TestHashStore_HSetWithTTL(t *testing.T) {
-	cache := standalone(t)
-	store := hive.NewHashStore[Stream](cache, "streams")
-
-	store.HSetWithTTL(t.Context(), "user:1", "stream:a", Stream{BitRate: 720}, 1100*time.Millisecond)
-
-	time.Sleep(1300 * time.Millisecond)
-
-	_, err := store.HGet(t.Context(), "user:1", "stream:a")
-	if !errors.Is(err, hive.ErrNotFound) {
-		t.Fatalf("field with TTL still present: %v", err)
 	}
 }
 

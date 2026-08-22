@@ -47,7 +47,3 @@ func DecodeValueStructure(data []byte) (*ValueStructure, error) {
 	vs.mtime = w.MTime
 	return vs, nil
 }
-
-// Cleanup is a no-op for plain values — there are no sub-fields to expire.
-// Key-level expiry is handled by the DataStore directly.
-func (v *ValueStructure) Cleanup(_ time.Time) bool { return false }

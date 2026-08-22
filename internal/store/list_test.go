@@ -3,7 +3,6 @@ package store
 import (
 	"bytes"
 	"testing"
-	"time"
 )
 
 func TestListLPushRPush(t *testing.T) {
@@ -238,17 +237,6 @@ func TestListDecodeEmpty(t *testing.T) {
 	}
 	if decoded.Len() != 0 {
 		t.Errorf("DecodeListStructure empty: Len got %d, want 0", decoded.Len())
-	}
-}
-
-func TestListCleanupIsNoOp(t *testing.T) {
-	l := NewListStructure()
-	l.RPush([]byte("x"))
-	if l.Cleanup(time.Now()) {
-		t.Error("Cleanup: should always return false for lists")
-	}
-	if l.Len() != 1 {
-		t.Error("Cleanup: should not remove list elements")
 	}
 }
 

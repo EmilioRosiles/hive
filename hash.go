@@ -13,7 +13,7 @@ import (
 //
 //	streams := hive.NewHashStore[Stream](cluster, "streams")
 //	streams.HSet(ctx, "user:123", "stream:abc", Stream{StartedAt: time.Now()})
-//	streams.HExpireField(ctx, "user:123", "stream:abc", 30*time.Minute)
+//	streams.Expire(ctx, "user:123", 30*time.Minute)
 type HashStore[T any] struct {
 	cluster *Cluster
 	prefix  string
@@ -32,16 +32,6 @@ func (h *HashStore[T]) HSet(ctx context.Context, key, field string, value T) err
 		return fmt.Errorf("hive: %s.HSet %q %q: %w", h.prefix, key, field, err)
 	}
 	_, err = h.cluster.exec(ctx, transport.OpHSet, h.prefix+key, []byte(field), data)
-	return err
-}
-
-// HSetWithTTL encodes value and stores it under key/field with a per-field TTL.
-func (h *HashStore[T]) HSetWithTTL(ctx context.Context, key, field string, value T, ttl time.Duration) error {
-	data, err := encode(value)
-	if err != nil {
-		return fmt.Errorf("hive: %s.HSetWithTTL %q %q: %w", h.prefix, key, field, err)
-	}
-	_, err = h.cluster.exec(ctx, transport.OpHSet, h.prefix+key, []byte(field), data, encodeTTL(ttl))
 	return err
 }
 
@@ -66,7 +56,7 @@ func (h *HashStore[T]) HDel(ctx context.Context, key, field string) error {
 	return err
 }
 
-// HGetAll retrieves and decodes all live fields under key.
+// HGetAll retrieves and decodes all fields under key.
 // Results are returned as alternating field/value pairs, same as Redis HGETALL.
 func (h *HashStore[T]) HGetAll(ctx context.Context, key string) (map[string]T, error) {
 	results, err := h.cluster.exec(ctx, transport.OpHGetAll, h.prefix+key)
@@ -84,7 +74,7 @@ func (h *HashStore[T]) HGetAll(ctx context.Context, key string) (map[string]T, e
 	return out, nil
 }
 
-// HKeys returns the names of all live fields under key.
+// HKeys returns the names of all fields under key.
 func (h *HashStore[T]) HKeys(ctx context.Context, key string) ([]string, error) {
 	results, err := h.cluster.exec(ctx, transport.OpHKeys, h.prefix+key)
 	if err != nil {
@@ -106,12 +96,5 @@ func (h *HashStore[T]) Del(ctx context.Context, key string) error {
 // Expire sets a key-level TTL. The entire hash is deleted after ttl elapses.
 func (h *HashStore[T]) Expire(ctx context.Context, key string, ttl time.Duration) error {
 	_, err := h.cluster.exec(ctx, transport.OpExpire, h.prefix+key, encodeTTL(ttl))
-	return err
-}
-
-// HExpireField sets a TTL on a single field. The field is evicted after ttl
-// elapses without affecting other fields or the key itself.
-func (h *HashStore[T]) HExpireField(ctx context.Context, key, field string, ttl time.Duration) error {
-	_, err := h.cluster.exec(ctx, transport.OpHExpireField, h.prefix+key, []byte(field), encodeTTL(ttl))
 	return err
 }

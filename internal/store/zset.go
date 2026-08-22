@@ -4,7 +4,6 @@ import (
 	"math"
 	"math/bits"
 	"math/rand/v2"
-	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -331,9 +330,6 @@ func (z *ZSetStructure) ZRangeByScore(min, max float64) []zsetEntry {
 	}
 	return out
 }
-
-// Cleanup is a no-op — ZSet has no per-member TTL.
-func (z *ZSetStructure) Cleanup(_ time.Time) bool { return false }
 
 // -- serialization --
 

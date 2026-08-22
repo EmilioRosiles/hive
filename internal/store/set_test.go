@@ -4,7 +4,6 @@ import (
 	"slices"
 	"sort"
 	"testing"
-	"time"
 )
 
 func TestSetAddAndIsMember(t *testing.T) {
@@ -18,22 +17,12 @@ func TestSetAddAndIsMember(t *testing.T) {
 	}
 }
 
-func TestSetAddClearsTTL(t *testing.T) {
+func TestSetAddIsIdempotent(t *testing.T) {
 	ss := NewSetStructure()
-	ss.AddWithTTL("alice", 10*time.Millisecond)
-	ss.Add("alice") // re-add with no TTL
-	time.Sleep(20 * time.Millisecond)
-	if !ss.IsMember("alice") {
-		t.Error("Add after AddWithTTL should clear TTL; alice should still be a member")
-	}
-}
-
-func TestSetAddWithTTLExpires(t *testing.T) {
-	ss := NewSetStructure()
-	ss.AddWithTTL("alice", 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
-	if ss.IsMember("alice") {
-		t.Error("IsMember: alice should have expired")
+	ss.Add("alice")
+	ss.Add("alice")
+	if n := ss.Card(); n != 1 {
+		t.Errorf("Card after duplicate Add: got %d, want 1", n)
 	}
 }
 
@@ -55,8 +44,6 @@ func TestSetMembers(t *testing.T) {
 	ss := NewSetStructure()
 	ss.Add("alice")
 	ss.Add("bob")
-	ss.AddWithTTL("expired", 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
 
 	members := ss.Members()
 	sort.Strings(members)
@@ -69,52 +56,8 @@ func TestSetCard(t *testing.T) {
 	ss := NewSetStructure()
 	ss.Add("alice")
 	ss.Add("bob")
-	ss.AddWithTTL("expired", 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
-
 	if n := ss.Card(); n != 2 {
 		t.Errorf("Card: got %d, want 2", n)
-	}
-}
-
-func TestSetExpireMember(t *testing.T) {
-	ss := NewSetStructure()
-	ss.Add("alice")
-	ss.ExpireMember("alice", 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
-	if ss.IsMember("alice") {
-		t.Error("ExpireMember: alice should have expired")
-	}
-}
-
-func TestSetExpireMemberMissingIsNoOp(t *testing.T) {
-	ss := NewSetStructure()
-	ss.ExpireMember("nonexistent", time.Second) // should not panic
-}
-
-func TestSetCleanupRemovesExpiredMembers(t *testing.T) {
-	ss := NewSetStructure()
-	ss.Add("live")
-	ss.AddWithTTL("dead", 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
-
-	empty := ss.Cleanup(time.Now())
-	if empty {
-		t.Error("Cleanup: set should not be empty — live member remains")
-	}
-	if ss.IsMember("dead") {
-		t.Error("Cleanup: expired member should be removed")
-	}
-}
-
-func TestSetCleanupReportsEmptyWhenAllExpired(t *testing.T) {
-	ss := NewSetStructure()
-	ss.AddWithTTL("a", 10*time.Millisecond)
-	ss.AddWithTTL("b", 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
-
-	if empty := ss.Cleanup(time.Now()); !empty {
-		t.Error("Cleanup: should report empty when all members have expired")
 	}
 }
 
@@ -126,7 +69,7 @@ func TestSetByteSize(t *testing.T) {
 	}
 	ss.Add("alice")
 	ss.Add("bob")
-	want := int64(len("alice")+mapEntryOverhead) + int64(len("bob")+mapEntryOverhead) + mtimeSize + keyExpirySize
+	want := int64(len("alice")+mapBucketOverhead) + int64(len("bob")+mapBucketOverhead) + mtimeSize + keyExpirySize
 	if got := ss.ByteSize(); got != want {
 		t.Errorf("ByteSize: got %d, want %d", got, want)
 	}

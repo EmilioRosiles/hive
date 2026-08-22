@@ -15,20 +15,18 @@ const (
 	OpValueGet Op = 11
 
 	// Set ops.
-	OpSAdd          Op = 50
-	OpSRem          Op = 51
-	OpSIsMember     Op = 52
-	OpSMembers      Op = 53
-	OpSCard         Op = 54
-	OpSExpireMember Op = 55
+	OpSAdd      Op = 50
+	OpSRem      Op = 51
+	OpSIsMember Op = 52
+	OpSMembers  Op = 53
+	OpSCard     Op = 54
 
 	// Hash ops.
-	OpHSet         Op = 100
-	OpHGet         Op = 101
-	OpHDel         Op = 102
-	OpHGetAll      Op = 103
-	OpHKeys        Op = 104
-	OpHExpireField Op = 105
+	OpHSet    Op = 100
+	OpHGet    Op = 101
+	OpHDel    Op = 102
+	OpHGetAll Op = 103
+	OpHKeys   Op = 104
 
 	// List ops.
 	OpLPush  Op = 150

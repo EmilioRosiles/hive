@@ -31,9 +31,6 @@ type DecodeFunc func(data []byte) (DataStructure, error)
 // DataStructure is the common interface for all stored data types.
 type DataStructure interface {
 	Kind() Kind
-	// Cleanup removes any expired sub-fields and reports whether the structure
-	// is now empty and should be deleted by the janitor.
-	Cleanup(now time.Time) bool
 	// Encode serializes the full state for rebalance migration.
 	Encode() ([]byte, error)
 	// KeyExpiry returns the key-level expiry as a Unix timestamp in seconds,
@@ -79,7 +76,8 @@ const (
 	entryOverhead     = 64 // per-entry cost added to ByteSize() to account for the map bucket allocation
 	mtimeSize         = 4  // mtimeBase.mtime uint32
 	keyExpirySize     = 8  // key-level expiresAt int64
-	mapEntryOverhead  = 16 // per-item cost in member/field maps: int64 expiry (8) + map bucket (8)
+	mapEntryOverhead  = 16 // per-item cost in the zset scores map: float64 score (8) + map bucket (8)
+	mapBucketOverhead = 8  // per-item map bucket cost for maps
 	sliceItemOverhead = 24 // per-element cost in [][]byte slices: slice header (pointer+len+cap = 24)
 	zsetNodeOverhead  = 56 // zsetNode struct: member string header(16) + score(8) + backward ptr(8) + level slice header(24)
 	zsetLevelSize     = 16 // one zsetLevel: forward pointer (8) + span int (8)
@@ -354,20 +352,14 @@ func shardCount() uint64 {
 }
 
 // DeleteExpired sweeps all shards, removing entries whose key-level TTL has
-// elapsed and sub-structures (sets, hashes) whose all members have expired.
-// Called by the cluster janitor on each cleanup tick.
+// elapsed. Called by the cluster janitor on each cleanup tick.
 func (ds *DataStore) DeleteExpired() {
-	now := time.Now()
-	nowUnix := now.Unix()
+	nowUnix := time.Now().Unix()
 	for i := range ds.shardsCount {
 		s := ds.shards[i]
 		s.mu.Lock()
 		for key, e := range s.data {
 			if exp := e.KeyExpiry(); exp != 0 && nowUnix >= exp {
-				ds.removeEntry(s, key)
-				continue
-			}
-			if e.Cleanup(now) {
 				ds.removeEntry(s, key)
 			}
 		}
