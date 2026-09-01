@@ -164,8 +164,15 @@ func BenchmarkCluster_ForwardedGet(b *testing.B) {
 func BenchmarkCluster_ForwardedLock(b *testing.B) {
 	cache := benchForwardingCluster(b)
 	store := hive.NewValueStore[Session](cache, "bench")
+	v := Session{UserID: 1, Token: "bench-token"}
 
 	b.Run("SingleThreaded", func(b *testing.B) {
+		// Lock now requires the key to already exist, so pre-create every
+		// key this benchmark will touch before timing starts.
+		for i := range b.N {
+			store.Set(b.Context(), fmt.Sprintf("lock-%d", i), v)
+		}
+
 		b.ResetTimer()
 		for i := range b.N {
 			lock, err := store.Lock(b.Context(), fmt.Sprintf("lock-%d", i), time.Minute)
@@ -179,6 +186,10 @@ func BenchmarkCluster_ForwardedLock(b *testing.B) {
 	})
 	b.Run("Concurrent", func(b *testing.B) {
 		var counter atomic.Uint64
+		for i := 1; i <= b.N; i++ {
+			store.Set(b.Context(), fmt.Sprintf("lock-%d", i), v)
+		}
+
 		b.ResetTimer()
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {

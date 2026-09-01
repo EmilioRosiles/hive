@@ -241,6 +241,7 @@ func TestNamespaceIsolation(t *testing.T) {
 func TestLock_AcquireAndUnlock(t *testing.T) {
 	cache := standalone(t)
 	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
 
 	lock, err := store.Lock(t.Context(), "s1", time.Minute)
 	if err != nil {
@@ -256,9 +257,19 @@ func TestLock_AcquireAndUnlock(t *testing.T) {
 	}
 }
 
+func TestLock_NonExistentKey_ReturnsErrNotFound(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	if _, err := store.Lock(t.Context(), "s1", time.Minute); !errors.Is(err, hive.ErrNotFound) {
+		t.Errorf("Lock on nonexistent key: got %v, want ErrNotFound", err)
+	}
+}
+
 func TestLock_AlreadyLocked_ReturnsErrKeyLocked(t *testing.T) {
 	cache := standalone(t)
 	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
 
 	if _, err := store.Lock(t.Context(), "s1", time.Minute); err != nil {
 		t.Fatalf("Lock: %v", err)
@@ -291,6 +302,7 @@ func TestLock_BlocksOrdinaryOpsForEveryoneIncludingHolder(t *testing.T) {
 func TestLock_ContextAuthorizesHolderOps(t *testing.T) {
 	cache := standalone(t)
 	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
 
 	lock, err := store.Lock(t.Context(), "s1", time.Minute)
 	if err != nil {
@@ -326,6 +338,7 @@ func TestLock_ContextAuthorizesHolderOps(t *testing.T) {
 func TestLock_Renew(t *testing.T) {
 	cache := standalone(t)
 	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
 
 	lock, err := store.Lock(t.Context(), "s1", 1100*time.Millisecond)
 	if err != nil {
@@ -349,6 +362,7 @@ func TestLock_Renew(t *testing.T) {
 func TestLock_UnlockWrongHolder_ReturnsErrLockNotHeld(t *testing.T) {
 	cache := standalone(t)
 	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
 
 	lock, err := store.Lock(t.Context(), "s1", 1100*time.Millisecond)
 	if err != nil {
@@ -374,6 +388,7 @@ func TestLock_UnlockWrongHolder_ReturnsErrLockNotHeld(t *testing.T) {
 func TestLock_AutoExpires(t *testing.T) {
 	cache := standalone(t)
 	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
 
 	if _, err := store.Lock(t.Context(), "s1", 1100*time.Millisecond); err != nil {
 		t.Fatalf("Lock: %v", err)

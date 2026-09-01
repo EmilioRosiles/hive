@@ -24,6 +24,10 @@ func TestCluster_Lock_WorksAcrossForwarding(t *testing.T) {
 	// node actually owns "alice".
 	store := hive.NewValueStore[Session](c3, "sessions")
 
+	if err := store.Set(t.Context(), "alice", Session{UserID: 1}); err != nil {
+		t.Fatalf("forwarded Set (pre-lock): %v", err)
+	}
+
 	lock, err := store.Lock(t.Context(), "alice", time.Minute)
 	if err != nil {
 		t.Fatalf("Lock (forwarded): %v", err)

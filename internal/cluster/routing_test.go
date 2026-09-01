@@ -227,6 +227,9 @@ func TestExecOrForward_BareBackgroundContext_StillBoundedByRoutingTimeout(t *tes
 func TestDispatch_LockedKey_RejectsOtherOps(t *testing.T) {
 	m := newTestCluster("self")
 
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, "k", []byte("v")); err != nil {
+		t.Fatalf("dispatch Set: %v", err)
+	}
 	if _, err := m.dispatch(t.Context(), transport.OpLock, "k", lockArgs(time.Minute, 42)...); err != nil {
 		t.Fatalf("dispatch Lock: %v", err)
 	}
@@ -245,6 +248,9 @@ func TestDispatch_LockedKey_RejectsOtherOps(t *testing.T) {
 func TestDispatch_LockedKey_AuthorizedTokenBypassesGuard(t *testing.T) {
 	m := newTestCluster("self")
 
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, "k", []byte("v")); err != nil {
+		t.Fatalf("dispatch Set: %v", err)
+	}
 	const token = 42
 	if _, err := m.dispatch(t.Context(), transport.OpLock, "k", lockArgs(time.Minute, token)...); err != nil {
 		t.Fatalf("dispatch Lock: %v", err)
@@ -268,6 +274,9 @@ func TestDispatch_LockedKey_AuthorizedTokenBypassesGuard(t *testing.T) {
 func TestDispatch_UnlockAndRenew_BypassGuardAndWork(t *testing.T) {
 	m := newTestCluster("self")
 
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, "k", []byte("v")); err != nil {
+		t.Fatalf("dispatch Set: %v", err)
+	}
 	const token = 42
 	if _, err := m.dispatch(t.Context(), transport.OpLock, "k", lockArgs(time.Minute, token)...); err != nil {
 		t.Fatalf("dispatch Lock: %v", err)

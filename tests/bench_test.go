@@ -154,6 +154,13 @@ func BenchmarkHashStore_HGetAll_10Fields(b *testing.B) {
 func BenchmarkValueStore_Lock(b *testing.B) {
 	cache := benchStandalone(b)
 	store := hive.NewValueStore[Session](cache, "sessions")
+	v := Session{UserID: 1, Token: "bench-token"}
+
+	// Lock now requires the key to already exist, so pre-create every key
+	// this benchmark will touch before timing starts.
+	for i := range b.N {
+		store.Set(b.Context(), fmt.Sprintf("lock-%d", i), v)
+	}
 
 	b.ResetTimer()
 	for i := range b.N {
@@ -170,7 +177,14 @@ func BenchmarkValueStore_Lock(b *testing.B) {
 func BenchmarkValueStore_Lock_Parallel(b *testing.B) {
 	cache := benchStandalone(b)
 	store := hive.NewValueStore[Session](cache, "sessions")
+	v := Session{UserID: 1, Token: "bench-token"}
 	var counter atomic.Uint64
+
+	// Lock now requires the key to already exist, so pre-create every key
+	// this benchmark will touch before timing starts.
+	for i := 1; i <= b.N; i++ {
+		store.Set(b.Context(), fmt.Sprintf("lock-%d", i), v)
+	}
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {

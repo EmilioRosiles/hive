@@ -288,7 +288,7 @@ scores.Expire(ctx, "game:1", 24*time.Hour)
 
 ## Locking
 
-`Lock` acquires a non-blocking, cluster-wide distributed lock on a key, returning `ErrKeyLocked` immediately if it's already held. Every store type exposes it:
+`Lock` acquires a non-blocking, cluster-wide distributed lock on a key, returning `ErrKeyLocked` immediately if it's already held, or `ErrNotFound` if the key doesn't exist. Every store type exposes it:
 
 ```go
 lock, err := sessions.Lock(ctx, "user:123", 10*time.Second)

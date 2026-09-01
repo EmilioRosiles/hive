@@ -6,7 +6,7 @@ import (
 )
 
 // ErrNotFound is returned by Get operations when the key or field does not
-// exist or has expired.
+// exist or has expired, and by Lock when the key does not exist.
 var ErrNotFound = cluster.ErrNotFound
 
 // ErrCapacityExceeded is returned by write operations when the node has reached

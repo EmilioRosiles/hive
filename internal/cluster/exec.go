@@ -176,19 +176,17 @@ func execExpire(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, 
 // -- lock ops --
 
 // execLock creates a lock on key with the caller-provided token, failing
-// with ErrKeyLocked if already locked. The check-and-set is atomic since
-// both happen inside the same Apply call; a placeholder entry is created if
-// key doesn't exist yet.
+// with ErrNotFound if key doesn't exist and ErrKeyLocked if already locked.
+// The check-and-set is atomic since both happen inside the same Apply call.
 func execLock(m *Cluster, key string, args [][]byte, _ uint32) ([][]byte, error) {
 	ttl := decodeTTL(args, argLockTTL)
 	token := decodeUint32(args, argLockToken)
 	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
-		if ds != nil {
-			if exp := ds.LockExpiry(); exp != 0 && exp > uint32(time.Now().Unix()) {
-				return ds, ErrKeyLocked
-			}
-		} else {
-			ds = store.NewValueStructure(nil)
+		if ds == nil {
+			return nil, ErrNotFound
+		}
+		if exp := ds.LockExpiry(); exp != 0 && exp > uint32(time.Now().Unix()) {
+			return ds, ErrKeyLocked
 		}
 		ds.SetLock(token, uint32(time.Now().Add(ttl).Unix()))
 		return ds, nil

@@ -222,6 +222,7 @@ func decodeUint64(b []byte) uint64 {
 
 func TestExecLock_Acquires(t *testing.T) {
 	m := newTestCluster("self")
+	m.store.Set("k", newValueStructure(t, nil))
 
 	results, err := execLock(m, "k", lockArgs(time.Minute, 42), 0)
 	if err != nil {
@@ -233,10 +234,23 @@ func TestExecLock_Acquires(t *testing.T) {
 
 	e, ok := m.store.Get("k")
 	if !ok {
-		t.Fatal("execLock: placeholder entry should exist")
+		t.Fatal("execLock: entry should still exist")
 	}
 	if e.LockToken() != 42 || e.LockExpiry() == 0 {
 		t.Error("execLock: stored lock state should match the caller-provided token")
+	}
+}
+
+// TestExecLock_NonExistentKey_ReturnsErrNotFound confirms Lock no longer
+// creates a placeholder entry for a key that was never set.
+func TestExecLock_NonExistentKey_ReturnsErrNotFound(t *testing.T) {
+	m := newTestCluster("self")
+
+	if _, err := execLock(m, "k", lockArgs(time.Minute, 42), 0); !errors.Is(err, ErrNotFound) {
+		t.Errorf("execLock on nonexistent key: got %v, want ErrNotFound", err)
+	}
+	if _, ok := m.store.Get("k"); ok {
+		t.Error("execLock: no entry should have been created")
 	}
 }
 
@@ -246,6 +260,8 @@ func TestExecLock_Acquires(t *testing.T) {
 func TestExecLock_ReplayingSameArgs_ProducesIdenticalToken(t *testing.T) {
 	primary := newTestCluster("primary")
 	replica := newTestCluster("replica")
+	primary.store.Set("k", newValueStructure(t, nil))
+	replica.store.Set("k", newValueStructure(t, nil))
 
 	args := lockArgs(time.Minute, 12345)
 	if _, err := execLock(primary, "k", args, 0); err != nil {
@@ -264,6 +280,7 @@ func TestExecLock_ReplayingSameArgs_ProducesIdenticalToken(t *testing.T) {
 
 func TestExecLock_AlreadyLocked_ReturnsErrKeyLocked(t *testing.T) {
 	m := newTestCluster("self")
+	m.store.Set("k", newValueStructure(t, nil))
 
 	if _, err := execLock(m, "k", lockArgs(time.Minute, 1), 0); err != nil {
 		t.Fatalf("first execLock: %v", err)
@@ -275,6 +292,7 @@ func TestExecLock_AlreadyLocked_ReturnsErrKeyLocked(t *testing.T) {
 
 func TestExecLock_AfterExpiry_CanReacquire(t *testing.T) {
 	m := newTestCluster("self")
+	m.store.Set("k", newValueStructure(t, nil))
 
 	if _, err := execLock(m, "k", lockArgs(20*time.Millisecond, 1), 0); err != nil {
 		t.Fatalf("first execLock: %v", err)
@@ -288,6 +306,7 @@ func TestExecLock_AfterExpiry_CanReacquire(t *testing.T) {
 
 func TestExecLock_ConcurrentCallers_OnlyOneSucceeds(t *testing.T) {
 	m := newTestCluster("self")
+	m.store.Set("k", newValueStructure(t, nil))
 
 	const n = 50
 	var wg sync.WaitGroup
@@ -315,6 +334,7 @@ func TestExecLock_ConcurrentCallers_OnlyOneSucceeds(t *testing.T) {
 
 func TestExecUnlock_ReleasesLock(t *testing.T) {
 	m := newTestCluster("self")
+	m.store.Set("k", newValueStructure(t, nil))
 
 	if _, err := execLock(m, "k", lockArgs(time.Minute, 7), 0); err != nil {
 		t.Fatalf("execLock: %v", err)
@@ -326,7 +346,7 @@ func TestExecUnlock_ReleasesLock(t *testing.T) {
 
 	e, ok := m.store.Get("k")
 	if !ok {
-		t.Fatal("key should still exist after unlock (placeholder entry stays)")
+		t.Fatal("key should still exist after unlock")
 	}
 	if e.LockExpiry() != 0 {
 		t.Error("execUnlock: lock should be cleared")
@@ -340,6 +360,7 @@ func TestExecUnlock_ReleasesLock(t *testing.T) {
 
 func TestExecUnlock_WrongToken_ReturnsErrLockNotHeld(t *testing.T) {
 	m := newTestCluster("self")
+	m.store.Set("k", newValueStructure(t, nil))
 
 	if _, err := execLock(m, "k", lockArgs(time.Minute, 7), 0); err != nil {
 		t.Fatalf("execLock: %v", err)
@@ -360,6 +381,7 @@ func TestExecUnlock_NeverLocked_ReturnsErrLockNotHeld(t *testing.T) {
 
 func TestExecRenew_ExtendsTTL(t *testing.T) {
 	m := newTestCluster("self")
+	m.store.Set("k", newValueStructure(t, nil))
 
 	if _, err := execLock(m, "k", lockArgs(50*time.Millisecond, 7), 0); err != nil {
 		t.Fatalf("execLock: %v", err)
@@ -380,6 +402,7 @@ func TestExecRenew_ExtendsTTL(t *testing.T) {
 
 func TestExecRenew_WrongToken_ReturnsErrLockNotHeld(t *testing.T) {
 	m := newTestCluster("self")
+	m.store.Set("k", newValueStructure(t, nil))
 
 	if _, err := execLock(m, "k", lockArgs(time.Minute, 7), 0); err != nil {
 		t.Fatalf("execLock: %v", err)
