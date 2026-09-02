@@ -8,9 +8,11 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 )
 
 type vNode struct {
@@ -18,19 +20,23 @@ type vNode struct {
 	nodeID string
 }
 
-// Ring is a thread-safe consistent hash ring.
+// ringState is an immutable snapshot of the ring's topology.
+type ringState struct {
+	nodes  map[string]int // nodeID -> vNodeCount
+	vNodes []vNode
+}
+
+// Ring is a thread-safe consistent hash ring with virtual nodes.
 type Ring struct {
-	mu       sync.RWMutex
+	mu       sync.Mutex
 	Replicas int
-	nodes    map[string]int // nodeID -> vNodeCount
-	vNodes   []vNode
+	state    atomic.Pointer[ringState]
 }
 
 func New(replicas int) *Ring {
-	return &Ring{
-		Replicas: replicas,
-		nodes:    make(map[string]int),
-	}
+	r := &Ring{Replicas: replicas}
+	r.state.Store(&ringState{nodes: make(map[string]int)})
+	return r
 }
 
 // Add inserts a node into the ring with the given virtual node count.
@@ -39,21 +45,22 @@ func (r *Ring) Add(nodeID string, count int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, exists := r.nodes[nodeID]; exists {
-		filtered := r.vNodes[:0]
-		for _, v := range r.vNodes {
-			if v.nodeID != nodeID {
-				filtered = append(filtered, v)
-			}
+	existing := r.state.Load()
+	nodes := maps.Clone(existing.nodes)
+	vNodes := make([]vNode, 0, len(existing.vNodes)+count)
+	for _, v := range existing.vNodes {
+		if v.nodeID != nodeID {
+			vNodes = append(vNodes, v)
 		}
-		r.vNodes = filtered
 	}
 
-	r.nodes[nodeID] = count
+	nodes[nodeID] = count
 	for i := range count {
-		r.vNodes = append(r.vNodes, vNode{hash: hashKey(strconv.Itoa(i) + nodeID), nodeID: nodeID})
+		vNodes = append(vNodes, vNode{hash: hashKey(strconv.Itoa(i) + nodeID), nodeID: nodeID})
 	}
-	sort.Slice(r.vNodes, func(i, j int) bool { return r.vNodes[i].hash < r.vNodes[j].hash })
+	sort.Slice(vNodes, func(i, j int) bool { return vNodes[i].hash < vNodes[j].hash })
+
+	r.state.Store(&ringState{nodes: nodes, vNodes: vNodes})
 }
 
 // Remove deletes a node and all its virtual nodes from the ring.
@@ -61,46 +68,46 @@ func (r *Ring) Remove(nodeID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	delete(r.nodes, nodeID)
-	newVNodes := make([]vNode, 0, len(r.vNodes))
-	for _, v := range r.vNodes {
+	existing := r.state.Load()
+	nodes := maps.Clone(existing.nodes)
+	delete(nodes, nodeID)
+
+	vNodes := make([]vNode, 0, len(existing.vNodes))
+	for _, v := range existing.vNodes {
 		if v.nodeID != nodeID {
-			newVNodes = append(newVNodes, v)
+			vNodes = append(vNodes, v)
 		}
 	}
-	r.vNodes = newVNodes
+
+	r.state.Store(&ringState{nodes: nodes, vNodes: vNodes})
 }
 
 // Get returns the node IDs responsible for key. The first ID is the primary owner.
 // Returns up to Replicas unique node IDs.
 func (r *Ring) Get(key string) []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	if len(r.vNodes) == 0 {
+	st := r.state.Load()
+	if len(st.vNodes) == 0 {
 		return []string{}
 	}
 
 	h := hashKey(key)
-	idx := sort.Search(len(r.vNodes), func(i int) bool {
-		return r.vNodes[i].hash >= h
+	idx := sort.Search(len(st.vNodes), func(i int) bool {
+		return st.vNodes[i].hash >= h
 	})
-	if idx == len(r.vNodes) {
+	if idx == len(st.vNodes) {
 		idx = 0
 	}
 
 	uniqueNodes := make([]string, 0, r.Replicas)
-	seen := make(map[string]struct{})
 
 	i := idx
-	for len(uniqueNodes) < r.Replicas && len(seen) < len(r.nodes) {
-		v := r.vNodes[i]
-		if _, exists := seen[v.nodeID]; !exists {
-			seen[v.nodeID] = struct{}{}
-			uniqueNodes = append(uniqueNodes, v.nodeID)
+	for len(uniqueNodes) < r.Replicas && len(uniqueNodes) < len(st.nodes) {
+		nodeID := st.vNodes[i].nodeID
+		if !slices.Contains(uniqueNodes, nodeID) {
+			uniqueNodes = append(uniqueNodes, nodeID)
 		}
 		i++
-		if i == len(r.vNodes) {
+		if i == len(st.vNodes) {
 			i = 0
 		}
 	}
@@ -110,11 +117,9 @@ func (r *Ring) Get(key string) []string {
 
 // GetNodes returns all unique node IDs currently in the ring.
 func (r *Ring) GetNodes() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	uniqueNodes := make([]string, 0, len(r.nodes))
-	for nodeID := range r.nodes {
+	st := r.state.Load()
+	uniqueNodes := make([]string, 0, len(st.nodes))
+	for nodeID := range st.nodes {
 		uniqueNodes = append(uniqueNodes, nodeID)
 	}
 	return uniqueNodes
@@ -123,16 +128,14 @@ func (r *Ring) GetNodes() []string {
 // GetVersion returns a hash of the current ring topology.
 // Changes whenever nodes are added or removed.
 func (r *Ring) GetVersion() uint64 {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	if len(r.vNodes) == 0 {
+	st := r.state.Load()
+	if len(st.vNodes) == 0 {
 		slog.Warn("ring: error computing version: no nodes")
 		return 0
 	}
 
 	hasher := fnv.New64a()
-	for _, v := range r.vNodes {
+	for _, v := range st.vNodes {
 		if err := binary.Write(hasher, binary.BigEndian, int64(v.hash)); err != nil {
 			slog.Warn(fmt.Sprintf("ring: error computing version: %v", err))
 			return 0
@@ -142,25 +145,24 @@ func (r *Ring) GetVersion() uint64 {
 	return hasher.Sum64()
 }
 
+const (
+	fnvOffset32 uint32 = 2166136261
+	fnvPrime32  uint32 = 16777619
+)
+
 // hashKey returns the FNV-1a 32-bit hash of s.
 func hashKey(s string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(s))
-	return h.Sum32()
+	h := fnvOffset32
+	for i := range len(s) {
+		h ^= uint32(s[i])
+		h *= fnvPrime32
+	}
+	return h
 }
 
 // Copy returns a point-in-time snapshot of the ring.
 func (r *Ring) Copy() *Ring {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	nodes := make(map[string]int, len(r.nodes))
-	maps.Copy(nodes, r.nodes)
-	c := &Ring{
-		Replicas: r.Replicas,
-		nodes:    nodes,
-		vNodes:   make([]vNode, len(r.vNodes)),
-	}
-	copy(c.vNodes, r.vNodes)
+	c := &Ring{Replicas: r.Replicas}
+	c.state.Store(r.state.Load())
 	return c
 }

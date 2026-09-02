@@ -118,7 +118,8 @@ func TestClient_Pool_RoundRobinAcrossDistinctConnections(t *testing.T) {
 	}
 
 	seen := make(map[*mux]bool)
-	for i, m := range client.muxes {
+	for i := range client.muxes {
+		m := client.muxes[i].Load()
 		if m == nil {
 			t.Fatalf("slot %d: never dialed", i)
 		}
@@ -142,7 +143,9 @@ func TestClient_Pool_CloseClosesAllConnections(t *testing.T) {
 	}
 
 	muxes := make([]*mux, poolSize)
-	copy(muxes, client.muxes)
+	for i := range client.muxes {
+		muxes[i] = client.muxes[i].Load()
+	}
 
 	client.Close()
 
@@ -167,8 +170,8 @@ func TestClient_Pool_ReconnectsOnlyDeadSlot(t *testing.T) {
 		}
 	}
 
-	live := client.muxes[1]
-	dead := client.muxes[0]
+	live := client.muxes[1].Load()
+	dead := client.muxes[0].Load()
 	dead.shutdown(nil) // simulate slot 0's connection dying
 
 	for i := 0; i < poolSize; i++ {
@@ -177,13 +180,13 @@ func TestClient_Pool_ReconnectsOnlyDeadSlot(t *testing.T) {
 		}
 	}
 
-	if client.muxes[0] == dead {
+	if client.muxes[0].Load() == dead {
 		t.Error("slot 0: still pointing at the dead mux, want a fresh redialed one")
 	}
-	if client.muxes[0] == nil || client.muxes[0].closed() {
+	if got := client.muxes[0].Load(); got == nil || got.closed() {
 		t.Error("slot 0: expected a live redialed connection")
 	}
-	if client.muxes[1] != live {
+	if client.muxes[1].Load() != live {
 		t.Error("slot 1: should be untouched by slot 0's reconnect")
 	}
 }

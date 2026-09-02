@@ -47,7 +47,7 @@ func TestAdd_ReplacesVirtualNodes(t *testing.T) {
 	r.Add("a", 200)
 
 	count := 0
-	for _, v := range r.vNodes {
+	for _, v := range r.state.Load().vNodes {
 		if v.nodeID == "a" {
 			count++
 		}

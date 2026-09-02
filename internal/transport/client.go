@@ -20,14 +20,14 @@ type Client struct {
 	timeout   time.Duration
 	tlsConfig *tls.Config
 	mu        sync.Mutex
-	muxes     []*mux
+	muxes     []atomic.Pointer[mux]
 	next      atomic.Uint32
 }
 
 // NewClient creates a client for addr with a pool of poolSize connections
 // (minimum 1). If tlsConfig is non-nil, connections are dialed over TLS.
 func NewClient(addr string, tlsConfig *tls.Config, poolSize int) *Client {
-	return &Client{addr: addr, timeout: defaultTimeout, tlsConfig: tlsConfig, muxes: make([]*mux, max(1, poolSize))}
+	return &Client{addr: addr, timeout: defaultTimeout, tlsConfig: tlsConfig, muxes: make([]atomic.Pointer[mux], max(1, poolSize))}
 }
 
 // Send delivers frame to the peer and returns the response.
@@ -71,10 +71,14 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 
 // getMux returns the live mux for slot, dialing a new connection if needed.
 func (c *Client) getMux(slot int) (*mux, error) {
+	if m := c.muxes[slot].Load(); m != nil && !m.closed() {
+		return m, nil
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if m := c.muxes[slot]; m != nil && !m.closed() {
+	if m := c.muxes[slot].Load(); m != nil && !m.closed() {
 		return m, nil
 	}
 
@@ -88,27 +92,21 @@ func (c *Client) getMux(slot int) (*mux, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.muxes[slot] = newMux(conn)
-	return c.muxes[slot], nil
+	m := newMux(conn)
+	c.muxes[slot].Store(m)
+	return m, nil
 }
 
 // invalidate discards a dead mux so the next getMux dials fresh.
 func (c *Client) invalidate(slot int, dead *mux) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.muxes[slot] == dead {
-		c.muxes[slot] = nil
-	}
+	c.muxes[slot].CompareAndSwap(dead, nil)
 }
 
 // Close shuts down every connection in the pool.
 func (c *Client) Close() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for i, m := range c.muxes {
-		if m != nil {
+	for i := range c.muxes {
+		if m := c.muxes[i].Swap(nil); m != nil {
 			m.shutdown(nil)
-			c.muxes[i] = nil
 		}
 	}
 }

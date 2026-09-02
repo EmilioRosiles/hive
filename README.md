@@ -452,14 +452,14 @@ Standalone numbers come from the same driver container running a single uncluste
 
 | Metric | Standalone | Cluster mode (cross-node) |
 |---|---|---|
-| SET, single-threaded | ~779 ns/op (~1.28M ops/sec) | ~52 μs/op (~19.2K ops/sec) |
-| GET, single-threaded | ~737 ns/op (~1.36M ops/sec) | ~51 μs/op (~19.8K ops/sec) |
-| LOCK+UNLOCK, single-threaded | ~930 ns/op (~1.08M ops/sec) | ~101 μs/op (~9.9K ops/sec) |
-| SET, 8-way concurrent | ~2.99M ops/sec | ~87.5K ops/sec |
-| GET, 8-way concurrent | ~3.40M ops/sec | ~112.0K ops/sec |
-| LOCK+UNLOCK, 8-way concurrent | ~2.45M ops/sec | ~45.9K ops/sec |
+| SET, single-threaded | ~741 ns/op (~1.35M ops/sec) | ~47 μs/op (~21.5K ops/sec) |
+| GET, single-threaded | ~727 ns/op (~1.38M ops/sec) | ~53 μs/op (~19.0K ops/sec) |
+| LOCK+UNLOCK, single-threaded | ~802 ns/op (~1.25M ops/sec) | ~88 μs/op (~11.3K ops/sec) |
+| SET, 8-way concurrent | ~3.74M ops/sec | ~106.6K ops/sec |
+| GET, 8-way concurrent | ~4.09M ops/sec | ~136.5K ops/sec |
+| LOCK+UNLOCK, 8-way concurrent | ~3.00M ops/sec | ~56.0K ops/sec |
 
-LOCK's cost lines up with SET/GET as expected — a round trip of two ops costs almost exactly 2× one op, both standalone and cross-node.
+Cross-node, LOCK's cost lines up with SET/GET as expected — a round trip of two ops costs almost exactly 2× one op. Standalone the gap is much narrower, since there's no per-op network round trip for a second op to double.
 
 Two different memory numbers, since they answer different questions:
 
@@ -468,7 +468,7 @@ Two different memory numbers, since they answer different questions:
 
 | Metric | Standalone | Cluster mode (relay/driver) |
 |---|---|---|
-| Node construction (`HeapAlloc` delta) | ~112 KB | ~859 KB |
+| Node construction (`HeapAlloc` delta) | ~61 KB | ~859 KB |
 | RSS, idle (no data) | ~9.3 MB | ~11.9 MB |
 | RSS, after 1,000 keys | ~9.5 MB (+133 B/key logical) | ~14.1 MB |
 | RSS, after full run above (~100K keys) | ~37.3 MB | ~13.7 MB |
