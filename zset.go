@@ -122,6 +122,13 @@ func (z *ZSetStore) Lock(ctx context.Context, key string, ttl time.Duration) (*L
 	return newLock(ctx, z.cluster, z.prefix+key, ttl)
 }
 
+// Atomic waits for a lock on key, then runs fn with the lock's authorized
+// context and releases the lock when fn returns. ttl bounds how long the
+// lock is held; ctx bounds how long Atomic waits to acquire it.
+func (z *ZSetStore) Atomic(ctx context.Context, key string, ttl time.Duration, fn func(ctx context.Context) error) error {
+	return lockAndRun(ctx, z.cluster, z.prefix+key, ttl, fn)
+}
+
 // decodeZSetEntries parses alternating [member, score, ...] byte slices.
 func decodeZSetEntries(results [][]byte) []ZSetEntry {
 	out := make([]ZSetEntry, 0, len(results)/2)

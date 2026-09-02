@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -397,5 +398,134 @@ func TestLock_AutoExpires(t *testing.T) {
 
 	if _, err := store.Lock(t.Context(), "s1", time.Minute); err != nil {
 		t.Errorf("Lock after expiry should succeed, got %v", err)
+	}
+}
+
+// -- Atomic --
+
+func TestAtomic_RunsFnUnderLockAndReleasesIt(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
+
+	var ran bool
+	err := store.Atomic(t.Context(), "s1", time.Minute, func(actx context.Context) error {
+		ran = true
+		// actx must be authorized against the lock Atomic itself holds.
+		return store.Set(actx, "s1", Session{UserID: 2, Token: "in-atomic"})
+	})
+	if err != nil {
+		t.Fatalf("Atomic: %v", err)
+	}
+	if !ran {
+		t.Fatal("fn was not called")
+	}
+
+	got, err := store.Get(t.Context(), "s1")
+	if err != nil || got.Token != "in-atomic" {
+		t.Fatalf("got (%+v, %v), want Token=in-atomic", got, err)
+	}
+
+	// The lock must be released once Atomic returns.
+	if _, err := store.Lock(t.Context(), "s1", time.Minute); err != nil {
+		t.Errorf("Lock after Atomic should succeed, got %v", err)
+	}
+}
+
+func TestAtomic_NonExistentKey_ReturnsErrNotFoundWithoutRunningFn(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+
+	var ran bool
+	err := store.Atomic(t.Context(), "s1", time.Minute, func(context.Context) error {
+		ran = true
+		return nil
+	})
+	if !errors.Is(err, hive.ErrNotFound) {
+		t.Errorf("Atomic on nonexistent key: got %v, want ErrNotFound", err)
+	}
+	if ran {
+		t.Error("fn should not run when the lock can never be acquired")
+	}
+}
+
+func TestAtomic_FnError_PropagatesAndStillReleasesLock(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
+
+	wantErr := errors.New("boom")
+	err := store.Atomic(t.Context(), "s1", time.Minute, func(context.Context) error {
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Errorf("Atomic: got %v, want %v", err, wantErr)
+	}
+
+	if _, err := store.Lock(t.Context(), "s1", time.Minute); err != nil {
+		t.Errorf("Lock after failed Atomic should succeed, got %v", err)
+	}
+}
+
+func TestAtomic_WaitsOutContentionThenRuns(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
+
+	lock, err := store.Lock(t.Context(), "s1", time.Minute)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- store.Atomic(t.Context(), "s1", time.Minute, func(context.Context) error {
+			return nil
+		})
+	}()
+
+	// Atomic must still be polling while the lock is held.
+	select {
+	case err := <-done:
+		t.Fatalf("Atomic returned before the lock was released: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := lock.Unlock(t.Context()); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Atomic after contention cleared: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Atomic did not acquire the lock after it was released")
+	}
+}
+
+func TestAtomic_CtxExpiresWhileWaiting_ReturnsWithoutRunningFn(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewValueStore[Session](cache, "sessions")
+	store.Set(t.Context(), "s1", Session{UserID: 1})
+
+	if _, err := store.Lock(t.Context(), "s1", time.Minute); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	var ran bool
+	err := store.Atomic(ctx, "s1", time.Minute, func(context.Context) error {
+		ran = true
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Atomic with expiring ctx: got %v, want context.DeadlineExceeded", err)
+	}
+	if ran {
+		t.Error("fn should not run if the lock was never acquired")
 	}
 }

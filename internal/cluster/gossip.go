@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"math/rand/v2"
 	"os"
 	"sync"
 	"time"
@@ -39,15 +38,11 @@ func (m *Cluster) handleLeave(payload []byte) error {
 
 // startGossip runs the heartbeat loop until the node shuts down.
 func (m *Cluster) startGossip() {
-	interval := m.cfg.GossipInterval
-	jitterRange := time.Duration(float64(interval) * 0.25)
-
 	for {
-		jitter := time.Duration(rand.Int64N(int64(jitterRange)*2)) - jitterRange
 		select {
 		case <-m.stopCh:
 			return
-		case <-time.After(interval + jitter):
+		case <-time.After(Jitter(m.cfg.GossipInterval, 0.25)):
 		}
 
 		targets := m.randomAlivePeers(m.cfg.GossipFanout)

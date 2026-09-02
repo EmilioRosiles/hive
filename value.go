@@ -66,3 +66,10 @@ func (s *ValueStore[T]) Expire(ctx context.Context, key string, ttl time.Duratio
 func (s *ValueStore[T]) Lock(ctx context.Context, key string, ttl time.Duration) (*Lock, error) {
 	return newLock(ctx, s.cluster, s.prefix+key, ttl)
 }
+
+// Atomic waits for a lock on key, then runs fn with the lock's authorized
+// context and releases the lock when fn returns. ttl bounds how long the
+// lock is held; ctx bounds how long Atomic waits to acquire it.
+func (s *ValueStore[T]) Atomic(ctx context.Context, key string, ttl time.Duration, fn func(ctx context.Context) error) error {
+	return lockAndRun(ctx, s.cluster, s.prefix+key, ttl, fn)
+}

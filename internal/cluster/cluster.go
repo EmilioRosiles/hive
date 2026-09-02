@@ -333,3 +333,10 @@ func computeVNodes(memLimit uint64) int {
 	}
 	return max(1, int(memLimit/unitSize)*vNodesPerUnit)
 }
+
+// Jitter returns interval adjusted by a uniformly random +/-factor offset.
+func Jitter(interval time.Duration, factor float64) time.Duration {
+	multiplier := (rand.Float64() * 2 * factor) - factor
+	jitter := time.Duration(float64(interval) * multiplier)
+	return interval + jitter
+}

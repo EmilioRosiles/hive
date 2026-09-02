@@ -288,7 +288,7 @@ scores.Expire(ctx, "game:1", 24*time.Hour)
 
 ## Locking
 
-`Lock` acquires a non-blocking, cluster-wide distributed lock on a key, returning `ErrKeyLocked` immediately if it's already held, or `ErrNotFound` if the key doesn't exist. Every store type exposes it:
+`Lock` is the low-level primitive: a non-blocking, cluster-wide distributed lock on a key, returning `ErrKeyLocked` immediately if it's already held, or `ErrNotFound` if the key doesn't exist. Every store type exposes it:
 
 ```go
 lock, err := sessions.Lock(ctx, "user:123", 10*time.Second)
@@ -311,6 +311,25 @@ sessions.Set(ctx, "user:123", updated)               // rejected: ErrKeyLocked
 ```
 
 `lock.Context(ctx)` carries the lock's token on top of whatever you pass in — pass your own in-flight `ctx` to preserve its values/deadline/cancellation, or `context.Background()` for a critical section that should run independently of any request already in flight. `Unlock`/`Renew` verify the caller still holds the lock (via that same token) and return `ErrLockNotHeld` otherwise — either it was never held, or it expired and was re-acquired by someone else. Locks expire automatically if never renewed or unlocked, so a crashed holder can't strand a key forever.
+
+Most callers don't need to drive `Lock` directly — see `Atomic` below for the common case of just running a function under it.
+
+### Atomic
+
+`Atomic` wraps `Lock` for the common case: acquire, run a function, release. It waits for the lock — retrying with backoff instead of failing immediately on `ErrKeyLocked` — until it acquires the lock or `ctx` is done, then calls `fn` with the lock's authorized context already applied, and releases the lock when `fn` returns:
+
+```go
+err := sessions.Atomic(ctx, "user:123", 10*time.Second, func(ctx context.Context) error {
+    s, err := sessions.Get(ctx, "user:123") // authorized: runs under the lock
+    if err != nil {
+        return err
+    }
+    s.Balance -= 10
+    return sessions.Set(ctx, "user:123", s)
+})
+```
+
+`ttl` bounds how long the lock is held once acquired, same as `Lock`; `ctx` bounds how long `Atomic` is willing to wait to acquire it — pass a `ctx` with no deadline to wait indefinitely. `fn`'s error is returned as-is; a nonexistent key still fails fast with `ErrNotFound` rather than retrying forever.
 
 ## Configuration
 

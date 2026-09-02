@@ -2,6 +2,7 @@ package hive
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"time"
 
@@ -63,4 +64,41 @@ func (l *Lock) Renew(ctx context.Context, ttl time.Duration) error {
 // your own ctx to preserve its values/deadline/cancellation.
 func (l *Lock) Context(ctx context.Context) context.Context {
 	return cluster.WithLockToken(ctx, l.token)
+}
+
+// lockAndRun waits for a lock on key, runs fn with the lock's authorized
+// context, then releases it. Shared by every store type's Atomic method —
+// key is already namespaced with that store's prefix.
+func lockAndRun(ctx context.Context, c *Cluster, key string, ttl time.Duration, fn func(ctx context.Context) error) (err error) {
+	lock, err := acquireWithBackoff(ctx, c, key, ttl)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock(context.WithoutCancel(ctx))
+	return fn(lock.Context(ctx))
+}
+
+// acquireWithBackoff retries newLock with jittered, capped exponential
+// backoff until it succeeds, ctx is done, or the attempt fails with anything
+// other than ErrKeyLocked.
+func acquireWithBackoff(ctx context.Context, c *Cluster, key string, ttl time.Duration) (*Lock, error) {
+	limit := 100 * time.Millisecond
+	delay := time.Millisecond
+	for {
+		lock, err := newLock(ctx, c, key, ttl)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, ErrKeyLocked) {
+			return nil, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(cluster.Jitter(delay, 0.25)):
+		}
+
+		delay = min(delay*2, limit)
+	}
 }

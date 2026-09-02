@@ -104,3 +104,10 @@ func (h *HashStore[T]) Expire(ctx context.Context, key string, ttl time.Duration
 func (h *HashStore[T]) Lock(ctx context.Context, key string, ttl time.Duration) (*Lock, error) {
 	return newLock(ctx, h.cluster, h.prefix+key, ttl)
 }
+
+// Atomic waits for a lock on key, then runs fn with the lock's authorized
+// context and releases the lock when fn returns. ttl bounds how long the
+// lock is held; ctx bounds how long Atomic waits to acquire it.
+func (h *HashStore[T]) Atomic(ctx context.Context, key string, ttl time.Duration, fn func(ctx context.Context) error) error {
+	return lockAndRun(ctx, h.cluster, h.prefix+key, ttl, fn)
+}
