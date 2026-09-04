@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 // startTestServerTLS mirrors startTestServer but binds over TLS.
 func startTestServerTLS(t *testing.T, handler Handler, tlsConfig *tls.Config) *Server {
 	t.Helper()
-	s, err := NewServer("127.0.0.1:0", handler, tlsConfig)
+	s, err := NewServer("127.0.0.1:0", handler, tlsConfig, slog.Default())
 	if err != nil {
 		t.Fatalf("NewServer (TLS): %v", err)
 	}
@@ -39,7 +40,7 @@ func TestServer_TLS_RoundTrip(t *testing.T) {
 	client := NewClient(s.Addr().String(), &tls.Config{
 		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: true, // this test only exercises wiring, not verification policy
-	}, 1)
+	}, 1, slog.Default())
 	defer client.Close()
 
 	resp, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("hi")})
@@ -63,7 +64,7 @@ func TestClient_PlaintextDial_RejectedByTLSServer(t *testing.T) {
 	handler, _ := echoHandler(t, nil)
 	s := startTestServerTLS(t, handler, &tls.Config{Certificates: []tls.Certificate{cert}})
 
-	client := NewClient(s.Addr().String(), nil, 1)
+	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
 	defer client.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

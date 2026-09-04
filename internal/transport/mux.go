@@ -31,13 +31,15 @@ type mux struct {
 	nextID  atomic.Uint32
 	done    chan struct{}
 	once    sync.Once
+	logger  *slog.Logger
 }
 
-func newMux(conn net.Conn) *mux {
+func newMux(conn net.Conn, logger *slog.Logger) *mux {
 	m := &mux{
-		conn: conn,
-		w:    newFrameWriter(conn),
-		done: make(chan struct{}),
+		conn:   conn,
+		w:      newFrameWriter(conn),
+		done:   make(chan struct{}),
+		logger: logger,
 	}
 	go m.readLoop()
 	return m
@@ -87,7 +89,7 @@ func (m *mux) readLoop() {
 		if ch, ok := m.pending.LoadAndDelete(frame.ID); ok {
 			ch.(chan Frame) <- frame
 		} else {
-			slog.Warn(fmt.Sprintf("mux: received response for unknown id %d", frame.ID))
+			m.logger.Warn("mux: received response for unknown id", "id", frame.ID)
 		}
 	}
 }
@@ -107,7 +109,7 @@ func (m *mux) shutdown(cause error) {
 		})
 
 		if cause != nil && !errors.Is(cause, net.ErrClosed) {
-			slog.Warn(fmt.Sprintf("mux: connection to %s lost: %v", m.conn.RemoteAddr(), cause))
+			m.logger.Warn("mux: connection lost", "remote_addr", m.conn.RemoteAddr(), "err", cause)
 		}
 	})
 }

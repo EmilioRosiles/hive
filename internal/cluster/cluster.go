@@ -44,6 +44,7 @@ type Config struct {
 	CleanupInterval      time.Duration
 	Clustered            bool
 	TLSConfig            *tls.Config
+	Logger               *slog.Logger
 }
 
 // PeerInfo is the canonical peer representation used both as internal mutable
@@ -72,12 +73,13 @@ type Cluster struct {
 	stopCh      chan struct{}
 	stopOnce    sync.Once
 	incarnation atomic.Uint64
+	logger      *slog.Logger
 }
 
 // NewCluster creates and starts a cluster Cluster.
 // In clustered mode it binds a TCP server and contacts Seeds to join.
 func NewCluster(cfg Config) (*Cluster, error) {
-	r := ring.New(cfg.ReplicationFactor)
+	r := ring.New(cfg.ReplicationFactor, cfg.Logger)
 	ds := store.NewDataStore(cfg.MemLimit)
 	vNodeCount := computeVNodes(cfg.MemLimit)
 
@@ -89,6 +91,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		clients:     make(map[string]*transport.Client),
 		replicators: make(map[string]*replicator),
 		stopCh:      make(chan struct{}),
+		logger:      cfg.Logger,
 	}
 	m.incarnation.Store(uint64(time.Now().UnixNano()))
 	m.ring.Add(cfg.NodeID, vNodeCount)
@@ -97,7 +100,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 
 	if cfg.Clustered {
 		addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.BindPort)
-		srv, err := transport.NewServer(addr, m.handleFrame, cfg.TLSConfig)
+		srv, err := transport.NewServer(addr, m.handleFrame, cfg.TLSConfig, cfg.Logger)
 		if err != nil {
 			return nil, err
 		}
@@ -109,7 +112,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		go m.startGossip()
 	}
 
-	slog.Info("hive: node started", "node", cfg.NodeID, "clustered", cfg.Clustered)
+	m.logger.Info("hive: node started", "node", cfg.NodeID, "clustered", cfg.Clustered)
 	return m, nil
 }
 
@@ -198,7 +201,7 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	m.replicators[ps.NodeID] = newReplicator(ps.NodeID, m)
 	go m.rebalancer.schedule()
 
-	slog.Info("cluster: added peer", "nodeID", ps.NodeID, "addr", ps.Addr)
+	m.logger.Info("cluster: added peer", "nodeID", ps.NodeID, "addr", ps.Addr)
 	return nil
 }
 
@@ -219,7 +222,7 @@ func (m *Cluster) markDead(nodeID string) {
 		delete(m.replicators, nodeID)
 	}
 	go m.rebalancer.schedule()
-	slog.Warn("cluster: peer marked dead", "node", nodeID)
+	m.logger.Warn("cluster: peer marked dead", "node", nodeID)
 }
 
 // startJanitor runs the cleanup loop until the node shuts down.
@@ -244,7 +247,7 @@ func (m *Cluster) evictDeadPeers() {
 	for nodeID, p := range m.peers {
 		if p.Status == NodeDead {
 			delete(m.peers, nodeID)
-			slog.Info("cluster: evicted dead peer tombstone", "node", nodeID)
+			m.logger.Info("cluster: evicted dead peer tombstone", "node", nodeID)
 		}
 	}
 }
@@ -274,7 +277,7 @@ func (m *Cluster) peerStatus(nodeID string) (NodeStatus, bool) {
 // newClient builds a transport client for addr, applying this node's TLS
 // config (nil means plaintext) and connection pool size.
 func (m *Cluster) newClient(addr string) *transport.Client {
-	return transport.NewClient(addr, m.cfg.TLSConfig, m.cfg.ConnPoolSize)
+	return transport.NewClient(addr, m.cfg.TLSConfig, m.cfg.ConnPoolSize, m.logger)
 }
 
 // getClient returns the transport client for a peer node ID.
@@ -320,18 +323,19 @@ func (m *Cluster) responsibleNodes(key string) []string {
 const (
 	vNodesPerUnit = 32        // virtual nodes per unitSize of memory
 	unitSize      = 256 << 20 // 256 MiB
+	minVNodes     = 8         // floor for any nonzero memLimit, however small below unitSize
 )
 
 // computeVNodes derives the virtual node count from a memory limit in bytes.
 // A memLimit of exactly 0 yields 0 vnodes — no keyspace ownership, used for
-// a pure routing/relay node. Any positive memLimit yields at least 1 vnode,
-// even if it's smaller than unitSize, so a small-but-nonzero limit is never
-// silently rounded down to zero ownership by integer truncation.
+// a pure routing/relay node. Any positive memLimit yields at least minVNodes,
+// even if it's smaller than unitSize, so a small-but-nonzero limit doesn't
+// collapse to a single vnode.
 func computeVNodes(memLimit uint64) int {
 	if memLimit == 0 {
 		return 0
 	}
-	return max(1, int(memLimit/unitSize)*vNodesPerUnit)
+	return max(minVNodes, int(memLimit/unitSize)*vNodesPerUnit)
 }
 
 // Jitter returns interval adjusted by a uniformly random +/-factor offset.

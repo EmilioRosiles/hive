@@ -1,6 +1,7 @@
 package ring
 
 import (
+	"log/slog"
 	"slices"
 	"testing"
 )
@@ -8,7 +9,7 @@ import (
 // -- Add / Get --
 
 func TestAdd_NodeAppearsInGet(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("node1", 100)
 
 	owners := r.Get("somekey")
@@ -21,7 +22,7 @@ func TestAdd_NodeAppearsInGet(t *testing.T) {
 }
 
 func TestAdd_Idempotent(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("node1", 100)
 	v1 := r.GetVersion()
 
@@ -37,7 +38,7 @@ func TestAdd_Idempotent(t *testing.T) {
 }
 
 func TestAdd_ReplacesVirtualNodes(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("a", 100)
 	r.Add("b", 100)
 	r.Add("c", 100)
@@ -63,7 +64,7 @@ func TestAdd_ReplacesVirtualNodes(t *testing.T) {
 // -- Remove --
 
 func TestRemove_NodeNotReturnedByGet(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("node1", 100)
 	r.Add("node2", 100)
 
@@ -79,7 +80,7 @@ func TestRemove_NodeNotReturnedByGet(t *testing.T) {
 }
 
 func TestRemove_UnknownNode_NoOp(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("node1", 100)
 	v := r.GetVersion()
 
@@ -91,7 +92,7 @@ func TestRemove_UnknownNode_NoOp(t *testing.T) {
 }
 
 func TestRemove_LastNode_EmptyRing(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("node1", 100)
 	r.Remove("node1")
 
@@ -103,14 +104,14 @@ func TestRemove_LastNode_EmptyRing(t *testing.T) {
 // -- Get --
 
 func TestGet_EmptyRing_ReturnsEmpty(t *testing.T) {
-	r := New(3)
+	r := New(3, slog.Default())
 	if owners := r.Get("key"); len(owners) != 0 {
 		t.Errorf("expected empty, got %v", owners)
 	}
 }
 
 func TestGet_CapsAtReplicas(t *testing.T) {
-	r := New(2)
+	r := New(2, slog.Default())
 	r.Add("a", 100)
 	r.Add("b", 100)
 	r.Add("c", 100)
@@ -122,7 +123,7 @@ func TestGet_CapsAtReplicas(t *testing.T) {
 }
 
 func TestGet_FewerNodesThanReplicas(t *testing.T) {
-	r := New(3)
+	r := New(3, slog.Default())
 	r.Add("only", 100)
 
 	owners := r.Get("key")
@@ -132,7 +133,7 @@ func TestGet_FewerNodesThanReplicas(t *testing.T) {
 }
 
 func TestGet_ReturnsUniqueNodes(t *testing.T) {
-	r := New(3)
+	r := New(3, slog.Default())
 	r.Add("a", 100)
 	r.Add("b", 100)
 	r.Add("c", 100)
@@ -148,7 +149,7 @@ func TestGet_ReturnsUniqueNodes(t *testing.T) {
 }
 
 func TestGet_Deterministic(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("a", 100)
 	r.Add("b", 100)
 	r.Add("c", 100)
@@ -163,7 +164,7 @@ func TestGet_Deterministic(t *testing.T) {
 }
 
 func TestGet_DistributesAcrossNodes(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("a", 100)
 	r.Add("b", 100)
 	r.Add("c", 100)
@@ -187,7 +188,7 @@ func TestGet_DistributesAcrossNodes(t *testing.T) {
 // -- GetNodes --
 
 func TestGetNodes_ReturnsAllNodes(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("x", 100)
 	r.Add("y", 100)
 	r.Add("z", 100)
@@ -205,7 +206,7 @@ func TestGetNodes_ReturnsAllNodes(t *testing.T) {
 }
 
 func TestGetNodes_EmptyRing(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	if nodes := r.GetNodes(); len(nodes) != 0 {
 		t.Errorf("expected empty, got %v", nodes)
 	}
@@ -214,7 +215,7 @@ func TestGetNodes_EmptyRing(t *testing.T) {
 // -- GetVersion --
 
 func TestGetVersion_ChangesOnAdd(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("a", 100)
 	v1 := r.GetVersion()
 
@@ -227,7 +228,7 @@ func TestGetVersion_ChangesOnAdd(t *testing.T) {
 }
 
 func TestGetVersion_ChangesOnRemove(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("a", 100)
 	r.Add("b", 100)
 	v1 := r.GetVersion()
@@ -241,7 +242,7 @@ func TestGetVersion_ChangesOnRemove(t *testing.T) {
 }
 
 func TestGetVersion_StableWithNoChanges(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("a", 100)
 	v := r.GetVersion()
 
@@ -255,7 +256,7 @@ func TestGetVersion_StableWithNoChanges(t *testing.T) {
 // -- Copy --
 
 func TestCopy_IsIndependentSnapshot(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("a", 100)
 	r.Add("b", 100)
 
@@ -274,7 +275,7 @@ func TestCopy_IsIndependentSnapshot(t *testing.T) {
 }
 
 func TestCopy_PreservesReplicas(t *testing.T) {
-	r := New(3)
+	r := New(3, slog.Default())
 	r.Add("a", 100)
 	r.Add("b", 100)
 	r.Add("c", 100)
@@ -287,7 +288,7 @@ func TestCopy_PreservesReplicas(t *testing.T) {
 }
 
 func TestCopy_PreservesVersion(t *testing.T) {
-	r := New(1)
+	r := New(1, slog.Default())
 	r.Add("a", 100)
 
 	snap := r.Copy()

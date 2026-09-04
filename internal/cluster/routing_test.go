@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -138,7 +139,7 @@ func newForwardingTestCluster(t *testing.T, gate chan struct{}) *Cluster {
 	srv, err := transport.NewServer("127.0.0.1:0", func(msgType transport.MsgType, payload []byte) ([]byte, error) {
 		<-gate
 		return nil, errors.New("newForwardingTestCluster: peer should never respond")
-	}, nil)
+	}, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("newForwardingTestCluster: %v", err)
 	}

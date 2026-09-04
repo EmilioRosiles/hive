@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -46,6 +47,7 @@ func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int
 		ReplicationBatchSize: 16,
 		CleanupInterval:      time.Second,
 		Clustered:            true,
+		Logger:               slog.Default(),
 	})
 	if err != nil {
 		t.Fatalf("NewCluster: %v", err)

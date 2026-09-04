@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"slices"
 	"sync"
 	"time"
@@ -24,7 +23,7 @@ func (m *Cluster) handleRebalance(payload []byte) ([]byte, error) {
 	for _, re := range batch.Entries {
 		entry, err := m.store.DecodeEntry(store.Kind(re.Kind), re.Data)
 		if err != nil {
-			slog.Warn("rebalance: decode entry failed", "key", re.Key, "err", err)
+			m.logger.Warn("rebalance: decode entry failed", "key", re.Key, "err", err)
 			continue
 		}
 		if re.TTL > 0 {
@@ -35,7 +34,7 @@ func (m *Cluster) handleRebalance(payload []byte) ([]byte, error) {
 			entry.SetKeyExpiry(uint32(received.Add(remaining).Unix()))
 		}
 		if err := m.store.ApplyIfNewer(re.Key, entry); err != nil {
-			slog.Warn("rebalance: store failed", "key", re.Key, "err", err)
+			m.logger.Warn("rebalance: store failed", "key", re.Key, "err", err)
 		}
 	}
 	return nil, nil
@@ -88,7 +87,7 @@ func (rm *rebalancer) run() {
 	rm.lastRing = newRing.Copy()
 	m.mu.Unlock()
 
-	slog.Debug("rebalance: started")
+	m.logger.Debug("rebalance: started")
 
 	batchesByNode := make(map[string][]transport.RebalanceEntry)
 	var deleteList []string
@@ -114,7 +113,7 @@ func (rm *rebalancer) run() {
 
 			data, err := entry.Encode()
 			if err != nil {
-				slog.Warn("rebalance: encode failed", "key", key, "err", err)
+				m.logger.Warn("rebalance: encode failed", "key", key, "err", err)
 				return
 			}
 
@@ -137,13 +136,13 @@ func (rm *rebalancer) run() {
 		m.store.Del(key)
 	}
 
-	slog.Debug("rebalance: finished")
+	m.logger.Debug("rebalance: finished")
 }
 
 func (m *Cluster) sendRebalanceBatch(nodeID string, entries []transport.RebalanceEntry) {
 	client, ok := m.getClient(nodeID)
 	if !ok {
-		slog.Warn("rebalance: no client", "node", nodeID)
+		m.logger.Warn("rebalance: no client", "node", nodeID)
 		return
 	}
 
@@ -152,16 +151,16 @@ func (m *Cluster) sendRebalanceBatch(nodeID string, entries []transport.Rebalanc
 		batch := transport.RebalanceBatch{Entries: entries[i:end]}
 		payload, err := transport.Encode(batch)
 		if err != nil {
-			slog.Warn("rebalance: encode batch failed", "node", nodeID, "err", err)
+			m.logger.Warn("rebalance: encode batch failed", "node", nodeID, "err", err)
 			continue
 		}
 		if _, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgRebalance, Payload: payload}); err != nil {
-			slog.Warn("rebalance: send failed", "node", nodeID, "err", err)
+			m.logger.Warn("rebalance: send failed", "node", nodeID, "err", err)
 			m.markDead(nodeID)
 			return
 		}
 	}
-	slog.Info("rebalance: migration complete", "keys", len(entries), "node", nodeID)
+	m.logger.Info("rebalance: migration complete", "keys", len(entries), "node", nodeID)
 }
 
 // migrationTargets returns node IDs that are in newOwners but not in oldOwners.

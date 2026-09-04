@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 )
 
@@ -22,7 +23,7 @@ func TestClient_RoundTrip_MsgForward(t *testing.T) {
 	handler, received := echoHandler(t, map[MsgType][]byte{MsgForward: respPayload})
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String(), nil, 1)
+	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
 	defer client.Close()
 
 	frame, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: reqPayload})
@@ -48,7 +49,7 @@ func TestClient_HandlerError_ReturnsErrRejected(t *testing.T) {
 	}
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String(), nil, 1)
+	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
 	defer client.Close()
 
 	_, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")})
@@ -70,7 +71,7 @@ func TestClient_ConcurrentSends_MultiplexedOverOneConnection(t *testing.T) {
 	}
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String(), nil, 1)
+	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
 	defer client.Close()
 
 	const n = 100
@@ -108,7 +109,7 @@ func TestClient_Pool_RoundRobinAcrossDistinctConnections(t *testing.T) {
 	s := startTestServer(t, handler)
 
 	const poolSize = 3
-	client := NewClient(s.Addr().String(), nil, poolSize)
+	client := NewClient(s.Addr().String(), nil, poolSize, slog.Default())
 	defer client.Close()
 
 	for i := 0; i < poolSize; i++ {
@@ -135,7 +136,7 @@ func TestClient_Pool_CloseClosesAllConnections(t *testing.T) {
 	s := startTestServer(t, handler)
 
 	const poolSize = 3
-	client := NewClient(s.Addr().String(), nil, poolSize)
+	client := NewClient(s.Addr().String(), nil, poolSize, slog.Default())
 	for i := 0; i < poolSize; i++ {
 		if _, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
 			t.Fatalf("Send: %v", err)
@@ -161,7 +162,7 @@ func TestClient_Pool_ReconnectsOnlyDeadSlot(t *testing.T) {
 	s := startTestServer(t, handler)
 
 	const poolSize = 2
-	client := NewClient(s.Addr().String(), nil, poolSize)
+	client := NewClient(s.Addr().String(), nil, poolSize, slog.Default())
 	defer client.Close()
 
 	for i := 0; i < poolSize; i++ {
@@ -203,7 +204,7 @@ func TestClient_RoundTrip_MsgRebalance(t *testing.T) {
 	handler, received := echoHandler(t, nil)
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String(), nil, 1)
+	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
 	defer client.Close()
 
 	frame, err := client.Send(context.Background(), Frame{Type: MsgRebalance, Payload: payload})

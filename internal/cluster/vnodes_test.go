@@ -8,11 +8,13 @@ func TestComputeVNodes_Zero_OwnsNothing(t *testing.T) {
 	}
 }
 
-func TestComputeVNodes_TinyNonzero_FloorsToOne(t *testing.T) {
+func TestComputeVNodes_TinyNonzero_FloorsToMinVNodes(t *testing.T) {
 	// Smaller than one unitSize: must not silently truncate to 0 just
 	// because it's less than a full unit — only a true 0 should do that.
-	if got := computeVNodes(1); got != 1 {
-		t.Errorf("computeVNodes(1): got %d, want 1", got)
+	// The floor is minVNodes (not 1): a single vnode has too much ring
+	// placement variance, especially with few nodes in the cluster.
+	if got := computeVNodes(1); got != minVNodes {
+		t.Errorf("computeVNodes(1): got %d, want %d", got, minVNodes)
 	}
 }
 

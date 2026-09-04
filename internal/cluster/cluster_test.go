@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"log/slog"
 	"math"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func newTestCluster(nodeID string) *Cluster {
 // newTestClusterRF mirrors newTestCluster with an explicit ReplicationFactor,
 // for tests that need an active (non-no-op) replicator — see newReplicator.
 func newTestClusterRF(nodeID string, rf int) *Cluster {
-	r := ring.New(rf)
+	r := ring.New(rf, slog.Default())
 	r.Add(nodeID, 100) // arbitrary nonzero vnode count for this no-network fixture
 	m := &Cluster{
 		cfg: Config{
@@ -38,6 +39,7 @@ func newTestClusterRF(nodeID string, rf int) *Cluster {
 		clients:     make(map[string]*transport.Client),
 		replicators: make(map[string]*replicator),
 		stopCh:      make(chan struct{}),
+		logger:      slog.Default(),
 	}
 	m.incarnation.Store(uint64(time.Now().UnixNano()))
 	m.rebalancer = newRebalancer(0, m)

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 // -- rebalancer creation --
 
 func TestNewCluster_ZeroMemLimit_NoopRebalancer(t *testing.T) {
-	m, err := NewCluster(Config{NodeID: "self", ReplicationFactor: 1, MemLimit: 0, CleanupInterval: time.Second})
+	m, err := NewCluster(Config{NodeID: "self", ReplicationFactor: 1, MemLimit: 0, CleanupInterval: time.Second, Logger: slog.Default()})
 	if err != nil {
 		t.Fatalf("NewCluster: %v", err)
 	}
@@ -25,7 +26,7 @@ func TestNewCluster_ZeroMemLimit_NoopRebalancer(t *testing.T) {
 }
 
 func TestNewCluster_NonZeroMemLimit_ActiveRebalancer(t *testing.T) {
-	m, err := NewCluster(Config{NodeID: "self", ReplicationFactor: 1, MemLimit: 256 << 20, CleanupInterval: time.Second})
+	m, err := NewCluster(Config{NodeID: "self", ReplicationFactor: 1, MemLimit: 256 << 20, CleanupInterval: time.Second, Logger: slog.Default()})
 	if err != nil {
 		t.Fatalf("NewCluster: %v", err)
 	}

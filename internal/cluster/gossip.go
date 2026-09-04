@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"os"
 	"sync"
@@ -60,7 +59,7 @@ func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 
 	payload, err := transport.Encode(m.buildHeartbeatRequest())
 	if err != nil {
-		slog.Warn("gossip: encode heartbeat failed", "err", err)
+		m.logger.Warn("gossip: encode heartbeat failed", "err", err)
 		return
 	}
 	frame := transport.Frame{Type: transport.MsgHeartbeat, Payload: payload}
@@ -76,19 +75,19 @@ func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 		resp, err := client.Send(ctx, frame)
 		cancel()
 		if err != nil {
-			slog.Warn("gossip: heartbeat failed", "node", p.NodeID, "err", err)
+			m.logger.Warn("gossip: heartbeat failed", "node", p.NodeID, "err", err)
 			m.markDead(p.NodeID)
 			continue
 		}
 
 		var hbResp transport.HeartbeatResponse
 		if err := transport.Decode(resp.Payload, &hbResp); err != nil {
-			slog.Warn("gossip: decode response failed", "node", p.NodeID, "err", err)
+			m.logger.Warn("gossip: decode response failed", "node", p.NodeID, "err", err)
 			continue
 		}
 
 		if err := m.mergeState(hbResp.Peers); err != nil {
-			slog.Warn("gossip: merge state failed", "node", p.NodeID, "err", err)
+			m.logger.Warn("gossip: merge state failed", "node", p.NodeID, "err", err)
 		}
 	}
 }
@@ -108,22 +107,22 @@ func (m *Cluster) bootstrap(addr string) {
 	if err != nil {
 		var rejected *transport.ErrRejected
 		if errors.As(err, &rejected) {
-			slog.Error("hive: cluster rejected join", "addr", addr, "reason", rejected.Error())
+			m.logger.Error("hive: cluster rejected join", "addr", addr, "reason", rejected.Error())
 			os.Exit(1)
 		}
-		slog.Warn("bootstrap: seed unreachable", "addr", addr, "err", err)
+		m.logger.Warn("bootstrap: seed unreachable", "addr", addr, "err", err)
 		return
 	}
 	var hbResp transport.HeartbeatResponse
 	if err := transport.Decode(resp.Payload, &hbResp); err != nil {
-		slog.Warn("bootstrap: decode failed", "addr", addr, "err", err)
+		m.logger.Warn("bootstrap: decode failed", "addr", addr, "err", err)
 		return
 	}
 	if err := m.mergeState(hbResp.Peers); err != nil {
-		slog.Error("hive: cluster rejected join", "addr", addr, "reason", err)
+		m.logger.Error("hive: cluster rejected join", "addr", addr, "reason", err)
 		os.Exit(1)
 	}
-	slog.Info("bootstrap: joined via seed", "addr", addr, "peers", len(hbResp.Peers))
+	m.logger.Info("bootstrap: joined via seed", "addr", addr, "peers", len(hbResp.Peers))
 }
 
 // mergeState reconciles a peer's view of the cluster with our own.

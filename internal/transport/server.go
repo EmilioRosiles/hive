@@ -21,11 +21,12 @@ type Server struct {
 	stop    chan struct{}
 	mu      sync.Mutex
 	conns   map[net.Conn]struct{}
+	logger  *slog.Logger
 }
 
 // NewServer creates a TCP server bound to addr. If tlsConfig is non-nil,
 // connections are accepted over TLS using it; nil means plaintext.
-func NewServer(addr string, handler Handler, tlsConfig *tls.Config) (*Server, error) {
+func NewServer(addr string, handler Handler, tlsConfig *tls.Config, logger *slog.Logger) (*Server, error) {
 	var ln net.Listener
 	var err error
 	if tlsConfig != nil {
@@ -36,7 +37,7 @@ func NewServer(addr string, handler Handler, tlsConfig *tls.Config) (*Server, er
 	if err != nil {
 		return nil, fmt.Errorf("transport: listen %s: %w", addr, err)
 	}
-	return &Server{ln: ln, handler: handler, stop: make(chan struct{}), conns: make(map[net.Conn]struct{})}, nil
+	return &Server{ln: ln, handler: handler, stop: make(chan struct{}), conns: make(map[net.Conn]struct{}), logger: logger}, nil
 }
 
 // Addr returns the address the server is listening on.
@@ -53,7 +54,7 @@ func (s *Server) Serve() {
 			case <-s.stop:
 				return
 			default:
-				slog.Warn(fmt.Sprintf("transport: accept error: %v", err))
+				s.logger.Warn("transport: accept error", "err", err)
 				continue
 			}
 		}
@@ -89,11 +90,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			respPayload, handlerErr := s.handler(f.Type, f.Payload)
 			resp := Frame{ID: f.ID, Type: f.Type, Payload: respPayload}
 			if handlerErr != nil {
-				slog.Warn(fmt.Sprintf("transport: handler error (type=%d): %v", f.Type, handlerErr))
+				s.logger.Warn("transport: handler error", "type", f.Type, "err", handlerErr)
 				resp.Err = handlerErr.Error()
 			}
 			if err := w.write(resp); err != nil {
-				slog.Warn(fmt.Sprintf("transport: encode response: %v", err))
+				s.logger.Warn("transport: encode response failed", "err", err)
 			}
 		}(frame)
 	}

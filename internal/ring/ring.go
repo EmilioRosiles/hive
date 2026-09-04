@@ -4,7 +4,6 @@ package ring
 
 import (
 	"encoding/binary"
-	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"maps"
@@ -31,10 +30,11 @@ type Ring struct {
 	mu       sync.Mutex
 	Replicas int
 	state    atomic.Pointer[ringState]
+	logger   *slog.Logger
 }
 
-func New(replicas int) *Ring {
-	r := &Ring{Replicas: replicas}
+func New(replicas int, logger *slog.Logger) *Ring {
+	r := &Ring{Replicas: replicas, logger: logger}
 	r.state.Store(&ringState{nodes: make(map[string]int)})
 	return r
 }
@@ -130,14 +130,14 @@ func (r *Ring) GetNodes() []string {
 func (r *Ring) GetVersion() uint64 {
 	st := r.state.Load()
 	if len(st.vNodes) == 0 {
-		slog.Warn("ring: error computing version: no nodes")
+		r.logger.Warn("ring: error computing version: no nodes")
 		return 0
 	}
 
 	hasher := fnv.New64a()
 	for _, v := range st.vNodes {
 		if err := binary.Write(hasher, binary.BigEndian, int64(v.hash)); err != nil {
-			slog.Warn(fmt.Sprintf("ring: error computing version: %v", err))
+			r.logger.Warn("ring: error computing version", "err", err)
 			return 0
 		}
 	}

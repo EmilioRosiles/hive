@@ -52,7 +52,7 @@ func NewNode(cfg Config) (*Node, error) {
 	if cfg.LogLevel != nil {
 		logLevel = *cfg.LogLevel
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 
 	if cfg.NodeID == "" {
 		id, err := randomID()
@@ -81,6 +81,7 @@ func NewNode(cfg Config) (*Node, error) {
 		CleanupInterval:      cfg.CleanupInterval,
 		Clustered:            cfg.Mode == ModeCluster,
 		TLSConfig:            cfg.TLSConfig,
+		Logger:               logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hive: start cluster manager: %w", err)

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -22,12 +23,13 @@ type Client struct {
 	mu        sync.Mutex
 	muxes     []atomic.Pointer[mux]
 	next      atomic.Uint32
+	logger    *slog.Logger
 }
 
 // NewClient creates a client for addr with a pool of poolSize connections
 // (minimum 1). If tlsConfig is non-nil, connections are dialed over TLS.
-func NewClient(addr string, tlsConfig *tls.Config, poolSize int) *Client {
-	return &Client{addr: addr, timeout: defaultTimeout, tlsConfig: tlsConfig, muxes: make([]atomic.Pointer[mux], max(1, poolSize))}
+func NewClient(addr string, tlsConfig *tls.Config, poolSize int, logger *slog.Logger) *Client {
+	return &Client{addr: addr, timeout: defaultTimeout, tlsConfig: tlsConfig, muxes: make([]atomic.Pointer[mux], max(1, poolSize)), logger: logger}
 }
 
 // Send delivers frame to the peer and returns the response.
@@ -92,7 +94,7 @@ func (c *Client) getMux(slot int) (*mux, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := newMux(conn)
+	m := newMux(conn, c.logger)
 	c.muxes[slot].Store(m)
 	return m, nil
 }
