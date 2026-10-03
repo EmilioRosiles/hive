@@ -31,27 +31,44 @@ func TestMergeState_UnknownDeadPeer_Ignored(t *testing.T) {
 	}
 }
 
-func TestMergeState_HigherIncarnation_AliveToDead(t *testing.T) {
+func TestMergeState_DeadRumour_UnreachablePeer_MarkedDead(t *testing.T) {
 	m := newTestCluster("self")
-	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
+	m.addPeer(ps("peer1", "127.0.0.1:1", NodeAlive, 100)) // nothing listens on port 1
 
-	m.mergeState([]transport.PeerState{ps("peer1", "127.0.0.1:1001", NodeDead, 101)})
+	m.mergeState([]transport.PeerState{ps("peer1", "127.0.0.1:1", NodeDead, 101)})
 
-	p, _ := m.getPeer("peer1")
-	if p.Status != NodeDead {
-		t.Errorf("peer1 should be dead after higher-incarnation dead gossip; got %v", p.Status)
+	waitForCond(t, time.Second, "peer1 confirmed dead", func() bool {
+		status, _ := m.peerStatus("peer1")
+		return status == NodeDead
+	})
+}
+
+func TestMergeState_DeadRumour_ReachablePeer_StaysAlive(t *testing.T) {
+	m := newTestCluster("self")
+	addr := startNodeServer(t, "peer1")
+	m.addPeer(ps("peer1", addr, NodeAlive, 100))
+	ringVersionBefore := m.ring.GetVersion()
+
+	m.mergeState([]transport.PeerState{ps("peer1", addr, NodeDead, 101)})
+
+	waitForCond(t, time.Second, "probe acked", func() bool {
+		status, _ := m.peerStatus("peer1")
+		return status == NodeAlive
+	})
+	if m.ring.GetVersion() != ringVersionBefore {
+		t.Error("a refuted dead rumour should not change the ring")
 	}
 }
 
-func TestMergeState_HigherIncarnation_SuspectToDead(t *testing.T) {
+func TestMergeState_DeadRumour_SuspectPeer_LeftToProbe(t *testing.T) {
 	m := newTestCluster("self")
 	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
 	setStatus(m, "peer1", NodeSuspect)
 
 	m.mergeState([]transport.PeerState{ps("peer1", "127.0.0.1:1001", NodeDead, 101)})
 
-	if status, _ := m.peerStatus("peer1"); status != NodeDead {
-		t.Errorf("status: got %v, want NodeDead", status)
+	if status, _ := m.peerStatus("peer1"); status != NodeSuspect {
+		t.Errorf("status: got %v, want NodeSuspect (the running probe decides)", status)
 	}
 }
 
@@ -144,9 +161,10 @@ func TestMergeState_EqualIncarnation_DeadWins(t *testing.T) {
 
 	m.mergeState([]transport.PeerState{ps("peer1", "127.0.0.1:1001", NodeDead, 100)})
 
-	if status, _ := m.peerStatus("peer1"); status != NodeDead {
-		t.Errorf("status: got %v, want NodeDead (Dead wins at equal incarnation)", status)
-	}
+	waitForCond(t, time.Second, "equal-incarnation dead rumour applied", func() bool {
+		status, _ := m.peerStatus("peer1")
+		return status == NodeDead
+	})
 }
 
 func TestMergeState_EqualIncarnation_AliveDoesNotRevive(t *testing.T) {

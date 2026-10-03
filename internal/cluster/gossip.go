@@ -127,7 +127,8 @@ func (m *Cluster) bootstrap(addr string) {
 
 // mergeState reconciles a peer's view of the cluster with our own, applying
 // each entry that takes precedence (see applyIncarnation) and refuting Dead
-// rumours about ourselves. Returns the first error, e.g. a replication factor mismatch.
+// rumours about ourselves. A Dead rumour about a peer is verified with our own
+// probe before acting on it. Returns the first error, e.g. a replication factor mismatch.
 func (m *Cluster) mergeState(remote []transport.PeerState) error {
 	for _, rs := range remote {
 		if rs.NodeID == m.cfg.NodeID {
@@ -149,7 +150,7 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 		if m.applyIncarnation(local, rs) {
 			switch NodeStatus(rs.Status) {
 			case NodeDead:
-				m.markDead(rs.NodeID)
+				m.markSuspect(rs.NodeID)
 			case NodeAlive:
 				if err := m.addPeer(rs); err != nil {
 					return err

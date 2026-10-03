@@ -130,7 +130,8 @@ func TestCluster_UngracefulFailure_DetectedAndDataSurvives(t *testing.T) {
 }
 
 // TestCluster_FalseDeath_IsRefuted checks that a node wrongly declared Dead
-// refutes the rumour once it hears it and is revived everywhere.
+// refutes the rumour once it hears it, and that other nodes verify the rumour
+// with their own probe instead of dropping the node.
 func TestCluster_FalseDeath_IsRefuted(t *testing.T) {
 	n1 := newClusteredTestNode(t, nil, 2)
 	n2 := newClusteredTestNode(t, []string{clusteredAddr(n1)}, 2)
@@ -143,6 +144,8 @@ func TestCluster_FalseDeath_IsRefuted(t *testing.T) {
 		return len(n1.Peers()) == 2 && len(n2.Peers()) == 2 && len(n3.Peers()) == 2
 	})
 
+	clientN3, _ := n3.getClient(n2.cfg.NodeID)
+
 	n1.markDead(n2.cfg.NodeID)
 
 	waitForCond(t, 3*time.Second, "n2 revived on n1 and n3", func() bool {
@@ -150,4 +153,7 @@ func TestCluster_FalseDeath_IsRefuted(t *testing.T) {
 		s3, _ := n3.peerStatus(n2.cfg.NodeID)
 		return s1 == NodeAlive && s3 == NodeAlive
 	})
+	if c, _ := n3.getClient(n2.cfg.NodeID); c != clientN3 {
+		t.Error("n3 dropped n2 on n1's rumour instead of verifying it with its own probe")
+	}
 }
