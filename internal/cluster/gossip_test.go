@@ -138,15 +138,59 @@ func TestMergeState_LowerIncarnation_Ignored(t *testing.T) {
 	}
 }
 
-func TestMergeState_EqualIncarnation_Ignored(t *testing.T) {
+func TestMergeState_EqualIncarnation_DeadWins(t *testing.T) {
 	m := newTestCluster("self")
 	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
 
 	m.mergeState([]transport.PeerState{ps("peer1", "127.0.0.1:1001", NodeDead, 100)})
 
-	p, _ := m.getPeer("peer1")
-	if p.Status != NodeAlive {
-		t.Error("equal-incarnation dead gossip should not override alive state")
+	if status, _ := m.peerStatus("peer1"); status != NodeDead {
+		t.Errorf("status: got %v, want NodeDead (Dead wins at equal incarnation)", status)
+	}
+}
+
+func TestMergeState_EqualIncarnation_AliveDoesNotRevive(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
+	m.markDead("peer1")
+
+	m.mergeState([]transport.PeerState{ps("peer1", "127.0.0.1:1001", NodeAlive, 100)})
+
+	if status, _ := m.peerStatus("peer1"); status != NodeDead {
+		t.Errorf("status: got %v, want NodeDead", status)
+	}
+}
+
+func TestMergeState_EqualIncarnation_RefreshesMemUsed(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
+
+	update := ps("peer1", "127.0.0.1:1001", NodeAlive, 100)
+	update.MemUsed = 42
+	m.mergeState([]transport.PeerState{update})
+
+	if p, _ := m.getPeer("peer1"); p.MemUsed != 42 {
+		t.Errorf("MemUsed: got %d, want 42", p.MemUsed)
+	}
+}
+
+func TestMergeState_DeadRumourAboutSelf_Refutes(t *testing.T) {
+	m := newTestCluster("self")
+	m.incarnation.Store(100)
+
+	m.mergeState([]transport.PeerState{ps("self", "127.0.0.1:7946", NodeDead, 50)})
+	if got := m.incarnation.Load(); got != 100 {
+		t.Errorf("older rumour: incarnation got %d, want 100 (already beats it)", got)
+	}
+
+	m.mergeState([]transport.PeerState{ps("self", "127.0.0.1:7946", NodeDead, 100)})
+	if got := m.incarnation.Load(); got != 101 {
+		t.Errorf("equal rumour: incarnation got %d, want 101", got)
+	}
+
+	m.mergeState([]transport.PeerState{ps("self", "127.0.0.1:7946", NodeAlive, 500)})
+	if got := m.incarnation.Load(); got != 101 {
+		t.Errorf("alive entry about self: incarnation got %d, want 101 (only Dead is refuted)", got)
 	}
 }
 
@@ -174,20 +218,36 @@ func TestMergeState_ReplicationFactorMismatch_ReturnsError(t *testing.T) {
 
 // -- buildHeartbeatRequest --
 
-func TestBuildHeartbeatRequest_BumpsIncarnationEachCall(t *testing.T) {
+func TestBuildHeartbeatRequest_DoesNotBumpIncarnation(t *testing.T) {
 	m := newTestCluster("self")
 	before := m.incarnation.Load()
 
 	m.buildHeartbeatRequest()
-	after1 := m.incarnation.Load()
 	m.buildHeartbeatRequest()
-	after2 := m.incarnation.Load()
 
-	if after1 <= before {
-		t.Errorf("incarnation should increase after first call: %d → %d", before, after1)
+	if got := m.incarnation.Load(); got != before {
+		t.Errorf("incarnation: got %d, want %d (only refutations bump it)", got, before)
 	}
-	if after2 <= after1 {
-		t.Errorf("incarnation should increase after second call: %d → %d", after1, after2)
+}
+
+func TestMergeState_UnknownSuspectPeer_Added(t *testing.T) {
+	m := newTestCluster("self")
+
+	m.mergeState([]transport.PeerState{ps("peer1", "127.0.0.1:1001", NodeSuspect, 100)})
+
+	if status, ok := m.peerStatus("peer1"); !ok || status != NodeAlive {
+		t.Errorf("got (%v, %v), want an Alive peer1 (only our own probe can suspect it)", status, ok)
+	}
+}
+
+func TestMergeState_SuspectRumour_KeepsPeerAlive(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
+
+	m.mergeState([]transport.PeerState{ps("peer1", "127.0.0.1:1001", NodeSuspect, 100)})
+
+	if status, _ := m.peerStatus("peer1"); status != NodeAlive {
+		t.Errorf("status: got %v, want NodeAlive (another node's suspicion isn't acted on)", status)
 	}
 }
 

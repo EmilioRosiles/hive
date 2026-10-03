@@ -22,8 +22,8 @@ type NodeStatus uint8
 
 const (
 	NodeAlive   NodeStatus = 0
-	NodeDead    NodeStatus = 1
-	NodeSuspect NodeStatus = 2
+	NodeSuspect NodeStatus = 1
+	NodeDead    NodeStatus = 2
 )
 
 // Config holds all configuration for the cluster manager.

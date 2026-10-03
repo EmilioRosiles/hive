@@ -125,20 +125,20 @@ func (m *Cluster) bootstrap(addr string) {
 	m.logger.Info("bootstrap: joined via seed", "addr", addr, "peers", len(hbResp.Peers))
 }
 
-// mergeState reconciles a peer's view of the cluster with our own.
-// Returns the first error encountered, e.g. a replication factor mismatch.
-// Incarnation is the authoritative ordering key. A remote state update is
-// applied only when its Incarnation greater than what we hold locally.
+// mergeState reconciles a peer's view of the cluster with our own, applying
+// each entry that takes precedence (see applyIncarnation) and refuting Dead
+// rumours about ourselves. Returns the first error, e.g. a replication factor mismatch.
 func (m *Cluster) mergeState(remote []transport.PeerState) error {
 	for _, rs := range remote {
 		if rs.NodeID == m.cfg.NodeID {
-			continue // our own state is authoritative; skip
+			m.refute(rs)
+			continue
 		}
 
 		local, exists := m.getPeer(rs.NodeID)
 
 		if !exists {
-			if NodeStatus(rs.Status) == NodeAlive {
+			if NodeStatus(rs.Status) != NodeDead {
 				if err := m.addPeer(rs); err != nil {
 					return err
 				}
@@ -146,12 +146,10 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 			continue
 		}
 
-		if localStatus, ok := m.applyIncarnation(local, rs.Incarnation); ok {
+		if m.applyIncarnation(local, rs) {
 			switch NodeStatus(rs.Status) {
 			case NodeDead:
-				if localStatus != NodeDead {
-					m.markDead(rs.NodeID)
-				}
+				m.markDead(rs.NodeID)
 			case NodeAlive:
 				if err := m.addPeer(rs); err != nil {
 					return err
@@ -162,26 +160,44 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 	return nil
 }
 
-// applyIncarnation atomically checks whether incarnation is newer than
-// local's current value and, if so, updates it. local is a live pointer into
-// m.peers shared with concurrent goroutines, so the check and the write must
-// happen under the same lock.
-func (m *Cluster) applyIncarnation(local *PeerInfo, incarnation uint64) (status NodeStatus, applied bool) {
+// applyIncarnation reports whether rs takes precedence over local and, if so,
+// records its incarnation: a higher incarnation wins, and at equal incarnation
+// the worse status wins (Dead > Suspect > Alive). MemUsed is refreshed from any
+// entry that isn't older.
+func (m *Cluster) applyIncarnation(local *PeerInfo, rs transport.PeerState) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if incarnation <= local.Incarnation {
-		return 0, false
+	if rs.Incarnation < local.Incarnation {
+		return false
 	}
-	local.Incarnation = incarnation
-	return NodeStatus(local.Status), true
+	local.MemUsed = rs.MemUsed
+	if rs.Incarnation == local.Incarnation && NodeStatus(rs.Status) <= local.Status {
+		return false
+	}
+	local.Incarnation = rs.Incarnation
+	return true
+}
+
+// refute bumps our incarnation past a Dead rumour about us, so our next
+// heartbeat overrides it. A node that announced its leave doesn't refute.
+func (m *Cluster) refute(rs transport.PeerState) {
+	if NodeStatus(rs.Status) != NodeDead || rs.Incarnation == math.MaxUint64 {
+		return
+	}
+	for {
+		cur := m.incarnation.Load()
+		if rs.Incarnation < cur || cur == math.MaxUint64 {
+			return
+		}
+		if m.incarnation.CompareAndSwap(cur, rs.Incarnation+1) {
+			m.logger.Warn("gossip: refuting dead rumour about this node", "incarnation", rs.Incarnation+1)
+			return
+		}
+	}
 }
 
 // buildHeartbeatRequest assembles the current node's peer list for gossip.
-// Incarnation is bumped on every call so each outgoing heartbeat carries a
-// strictly higher value than the previous one, ensuring our alive state beats
-// any stale dead rumour without needing an explicit refutation step.
 func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
-	m.incarnation.Add(1)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
