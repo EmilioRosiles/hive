@@ -3,8 +3,10 @@ package cluster
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/EmilioRosiles/hive/internal/store"
+	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
 // ErrNotFound is returned when a requested key or field does not exist or has expired.
@@ -19,9 +21,12 @@ var ErrKeyLocked = store.ErrKeyLocked
 // expired and was re-acquired by a different holder.
 var ErrLockNotHeld = errors.New("hive: lock not held")
 
+// ErrInternal is returned for unexpected failures that indicate a Hive bug.
+var ErrInternal = errors.New("hive: internal error")
+
 // errTypeMismatch is an internal sentinel for operations applied to the wrong
 // data structure kind. This indicates a Hive bug, not a caller error.
-var errTypeMismatch = errors.New("hive: type mismatch")
+var errTypeMismatch = fmt.Errorf("%w: type mismatch", ErrInternal)
 
 // errNotASet wraps errTypeMismatch with the expected kind.
 var errNotASet = fmt.Errorf("%w: expected set", errTypeMismatch)
@@ -34,3 +39,22 @@ var errNotAList = fmt.Errorf("%w: expected list", errTypeMismatch)
 
 // errNotAZSet wraps errTypeMismatch with the expected kind.
 var errNotAZSet = fmt.Errorf("%w: expected zset", errTypeMismatch)
+
+// remoteErrors are the public sentinels a forwarded op can return.
+var remoteErrors = []error{ErrNotFound, ErrKeyLocked, ErrLockNotHeld, store.ErrCapacityExceeded}
+
+// remoteErr maps a rejected forward back to the sentinel the remote node
+// returned, so errors.Is works across nodes. Unknown rejections become
+// ErrInternal; errors that aren't rejections are returned as is.
+func remoteErr(err error) error {
+	if !errors.Is(err, transport.ErrRejected) {
+		return err
+	}
+	remote := strings.TrimPrefix(err.Error(), transport.ErrRejected.Error()+": ")
+	for _, sentinel := range remoteErrors {
+		if strings.HasSuffix(remote, sentinel.Error()) {
+			return sentinel
+		}
+	}
+	return fmt.Errorf("%w: %s", ErrInternal, strings.TrimPrefix(remote, ErrInternal.Error()+": "))
+}

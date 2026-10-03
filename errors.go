@@ -21,3 +21,7 @@ var ErrKeyLocked = cluster.ErrKeyLocked
 // no longer matches — either it was never held, or it expired and was
 // re-acquired by a different holder.
 var ErrLockNotHeld = cluster.ErrLockNotHeld
+
+// ErrInternal is returned for unexpected failures that indicate a Hive bug,
+// such as an op applied to the wrong data structure kind.
+var ErrInternal = cluster.ErrInternal

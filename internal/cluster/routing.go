@@ -151,7 +151,7 @@ func (m *Cluster) sendForward(ctx context.Context, nodeID string, req transport.
 	}
 	respFrame, err := client.Send(ctx, transport.Frame{Type: transport.MsgForward, Payload: framePayload})
 	if err != nil {
-		return transport.ForwardResponse{}, err
+		return transport.ForwardResponse{}, remoteErr(err)
 	}
 	var resp transport.ForwardResponse
 	if len(respFrame.Payload) > 0 {
