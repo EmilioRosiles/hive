@@ -11,13 +11,13 @@ import (
 	"sync/atomic"
 )
 
-var errMuxClosed = errors.New("mux: connection closed")
+// ErrMuxClosed is returned when the connection closed after the frame was sent,
+// so the peer may or may not have applied it.
+var ErrMuxClosed = errors.New("mux: connection closed")
 
-// ErrRejected is returned by Client.Send when the remote handler rejected the
-// request. It is distinct from a network/connection failure.
-type ErrRejected struct{ msg string }
-
-func (e *ErrRejected) Error() string { return e.msg }
+// ErrRejected is returned by Client.Send when the peer handled the request
+// and answered with an error.
+var ErrRejected = errors.New("transport: rejected")
 
 // mux multiplexes concurrent request/response pairs over a single TCP
 // connection. One readLoop goroutine reads all inbound frames and routes
@@ -45,9 +45,13 @@ func newMux(conn net.Conn, logger *slog.Logger) *mux {
 	return m
 }
 
-// send delivers frame to the remote peer and returns the response.
-// Multiple goroutines may call send concurrently.
+// send delivers frame to the remote peer and returns the response, wrapping
+// ErrUnsent when the frame never left. Multiple goroutines may call send concurrently.
 func (m *mux) send(ctx context.Context, frame Frame) (Frame, error) {
+	if m.closed() {
+		return Frame{}, fmt.Errorf("mux: send: %w: %w", ErrUnsent, ErrMuxClosed)
+	}
+
 	id := m.nextID.Add(1)
 	frame.ID = id
 
@@ -58,22 +62,27 @@ func (m *mux) send(ctx context.Context, frame Frame) (Frame, error) {
 	if err != nil {
 		m.pending.Delete(id)
 		m.shutdown(err)
-		return Frame{}, fmt.Errorf("mux: send: %w", err)
+		return Frame{}, fmt.Errorf("mux: send: %w: %w", ErrUnsent, err)
 	}
 
+	var resp Frame
 	select {
-	case resp := <-ch:
-		if resp.Err != "" {
-			return resp, &ErrRejected{msg: resp.Err}
-		}
-		return resp, nil
+	case resp = <-ch:
 	case <-m.done:
 		m.pending.Delete(id)
-		return Frame{}, errMuxClosed
+		select {
+		case resp = <-ch:
+		default:
+			return Frame{}, ErrMuxClosed
+		}
 	case <-ctx.Done():
 		m.pending.Delete(id)
 		return Frame{}, fmt.Errorf("mux: send: %w", ctx.Err())
 	}
+	if resp.Err != "" {
+		return resp, fmt.Errorf("%w: %s", ErrRejected, resp.Err)
+	}
+	return resp, nil
 }
 
 // readLoop reads frames from the connection and routes each to its waiting sender.
@@ -94,19 +103,12 @@ func (m *mux) readLoop() {
 	}
 }
 
-// shutdown closes the mux exactly once, signals all pending senders, and closes
-// the underlying connection.
+// shutdown closes the mux and its connection exactly once, waking pending
+// senders through done.
 func (m *mux) shutdown(cause error) {
 	m.once.Do(func() {
 		close(m.done)
 		m.conn.Close()
-
-		errFrame := Frame{Err: errMuxClosed.Error()}
-		m.pending.Range(func(k, v any) bool {
-			v.(chan Frame) <- errFrame
-			m.pending.Delete(k)
-			return true
-		})
 
 		if cause != nil && !errors.Is(cause, net.ErrClosed) {
 			m.logger.Warn("mux: connection lost", "remote_addr", m.conn.RemoteAddr(), "err", cause)

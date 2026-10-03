@@ -14,6 +14,10 @@ import (
 
 const defaultTimeout = 3 * time.Second
 
+// ErrUnsent marks a Send failure where the frame was never written, so the
+// request is safe to retry.
+var ErrUnsent = errors.New("transport: frame not sent")
+
 // Client maintains a small pool of persistent connections to a peer, round-
 // robin selected so concurrent sends don't serialize on one connection.
 type Client struct {
@@ -32,7 +36,9 @@ func NewClient(addr string, tlsConfig *tls.Config, poolSize int, logger *slog.Lo
 	return &Client{addr: addr, timeout: defaultTimeout, tlsConfig: tlsConfig, muxes: make([]atomic.Pointer[mux], max(1, poolSize)), logger: logger}
 }
 
-// Send delivers frame to the peer and returns the response.
+// Send delivers frame to the peer and returns the response, retrying only while
+// the frame never left. Failures wrap ErrUnsent (not sent), ErrMuxClosed or a
+// context error (outcome unknown), or ErrRejected (peer answered with an error).
 func (c *Client) Send(ctx context.Context, frame Frame) (Frame, error) {
 	slot := int(c.next.Add(1)-1) % len(c.muxes)
 	for attempt := range 3 {
@@ -44,13 +50,13 @@ func (c *Client) Send(ctx context.Context, frame Frame) (Frame, error) {
 				}
 				continue
 			}
-			return Frame{}, fmt.Errorf("transport: connect to %s: %w", c.addr, err)
+			return Frame{}, fmt.Errorf("transport: connect to %s: %w: %w", c.addr, ErrUnsent, err)
 		}
 		resp, err := m.send(ctx, frame)
 		if err == nil {
 			return resp, nil
 		}
-		if errors.Is(err, errMuxClosed) && attempt < 2 {
+		if errors.Is(err, ErrUnsent) && attempt < 2 {
 			c.invalidate(slot, m)
 			if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
 				return Frame{}, serr

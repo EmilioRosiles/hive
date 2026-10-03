@@ -105,9 +105,8 @@ func (m *Cluster) bootstrap(addr string) {
 	client := m.newClient(addr)
 	resp, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgHeartbeat, Payload: payload})
 	if err != nil {
-		var rejected *transport.ErrRejected
-		if errors.As(err, &rejected) {
-			m.logger.Error("hive: cluster rejected join", "addr", addr, "reason", rejected.Error())
+		if errors.Is(err, transport.ErrRejected) {
+			m.logger.Error("hive: cluster rejected join", "addr", addr, "reason", err)
 			os.Exit(1)
 		}
 		m.logger.Warn("bootstrap: seed unreachable", "addr", addr, "err", err)

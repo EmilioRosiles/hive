@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -56,12 +59,11 @@ func TestClient_HandlerError_ReturnsErrRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var rejected *ErrRejected
-	if !errors.As(err, &rejected) {
-		t.Fatalf("got %v (%T), want *ErrRejected", err, err)
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("got %v, want an error wrapping ErrRejected", err)
 	}
-	if rejected.Error() != errBoom.Error() {
-		t.Errorf("got %q, want %q", rejected.Error(), errBoom.Error())
+	if !strings.Contains(err.Error(), errBoom.Error()) {
+		t.Errorf("got %q, want it to contain %q", err.Error(), errBoom.Error())
 	}
 }
 
@@ -189,6 +191,63 @@ func TestClient_Pool_ReconnectsOnlyDeadSlot(t *testing.T) {
 	}
 	if client.muxes[1].Load() != live {
 		t.Error("slot 1: should be untouched by slot 0's reconnect")
+	}
+}
+
+func TestClient_Send_DialFailure_WrapsErrUnsent(t *testing.T) {
+	client := NewClient("127.0.0.1:1", nil, 1, slog.Default()) // nothing listens on port 1
+	defer client.Close()
+
+	_, err := client.Send(context.Background(), Frame{Type: MsgForward})
+	if !errors.Is(err, ErrUnsent) {
+		t.Errorf("got %v, want an error wrapping ErrUnsent", err)
+	}
+}
+
+// The peer drops its first connection after reading the request and answers on
+// any later one, so a retry would surface as a successful Send.
+func TestClient_Send_ClosedAfterWrite_NotRetried(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	var conns atomic.Int32
+	go func() {
+		for {
+			nc, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			first := conns.Add(1) == 1
+			go func() {
+				defer nc.Close()
+				for {
+					f, err := ReadFrame(nc)
+					if err != nil || first {
+						return
+					}
+					if err := WriteFrame(nc, Frame{ID: f.ID, Type: f.Type}); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+
+	client := NewClient(ln.Addr().String(), nil, 1, slog.Default())
+	defer client.Close()
+
+	_, err = client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")})
+	if err == nil {
+		t.Fatal("Send succeeded, want an error: the request was resent after the peer read it")
+	}
+	if !errors.Is(err, ErrMuxClosed) || errors.Is(err, ErrUnsent) {
+		t.Errorf("got %v, want ErrMuxClosed without ErrUnsent", err)
+	}
+	if errors.Is(err, ErrRejected) {
+		t.Errorf("got %v, a lost connection must not be reported as a rejection", err)
 	}
 }
 
