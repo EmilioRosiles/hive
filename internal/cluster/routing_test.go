@@ -25,6 +25,16 @@ func TestDispatch_Write_ExecutesLocally(t *testing.T) {
 	}
 }
 
+// A relay node (0 vnodes) with no owning peers sees an empty ring.
+func TestDispatch_Write_EmptyRing_DoesNotPanic(t *testing.T) {
+	m := newTestCluster("self")
+	m.ring.Remove("self")
+
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, "key", []byte("value")); err != nil {
+		t.Fatalf("dispatch write: %v", err)
+	}
+}
+
 func TestDispatch_Read_ExecutesLocally(t *testing.T) {
 	m := newTestCluster("self")
 	m.store.Set("key", newValueStructure(t, []byte("hello")))

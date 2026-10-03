@@ -95,8 +95,10 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 		if err != nil {
 			return nil, err
 		}
-		req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
-		m.fanOutReplicas(def, req, nodes[1:])
+		if len(nodes) > 1 {
+			req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
+			m.fanOutReplicas(def, req, nodes[1:])
+		}
 		return result, nil
 
 	case ScopeLocal:
