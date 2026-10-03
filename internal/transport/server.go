@@ -65,9 +65,17 @@ func (s *Server) Serve() {
 // handleConn reads frames from a single persistent connection until it closes.
 // Each frame is dispatched concurrently; the response is written back with the
 // same ID so the remote mux can route it to the correct waiting goroutine.
+// A connection registered after Close has started is refused, so it can't outlive the server.
 func (s *Server) handleConn(conn net.Conn) {
 	s.mu.Lock()
-	s.conns[conn] = struct{}{}
+	select {
+	case <-s.stop:
+		s.mu.Unlock()
+		conn.Close()
+		return
+	default:
+		s.conns[conn] = struct{}{}
+	}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
