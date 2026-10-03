@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
@@ -39,6 +41,60 @@ func TestMergeState_HigherIncarnation_AliveToDead(t *testing.T) {
 	if p.Status != NodeDead {
 		t.Errorf("peer1 should be dead after higher-incarnation dead gossip; got %v", p.Status)
 	}
+}
+
+func TestMergeState_HigherIncarnation_SuspectToDead(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
+	setStatus(m, "peer1", NodeSuspect)
+
+	m.mergeState([]transport.PeerState{ps("peer1", "127.0.0.1:1001", NodeDead, 101)})
+
+	if status, _ := m.peerStatus("peer1"); status != NodeDead {
+		t.Errorf("status: got %v, want NodeDead", status)
+	}
+}
+
+func TestHeartbeat_Failure_ProbeAcks_StaysAlive(t *testing.T) {
+	release := make(chan struct{})
+	var pings atomic.Int32
+	addr := startPeerServer(t, func(msgType transport.MsgType, _ []byte) ([]byte, error) {
+		if msgType == transport.MsgPing {
+			pings.Add(1)
+			return nil, nil
+		}
+		<-release // heartbeats hang past GossipTimeout
+		return nil, nil
+	})
+	t.Cleanup(func() { close(release) })
+
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", addr, NodeAlive, 100))
+	ringVersionBefore := m.ring.GetVersion()
+
+	p, _ := m.getPeer("peer1")
+	m.heartbeat(p)
+
+	waitForCond(t, time.Second, "probe acked", func() bool {
+		status, _ := m.peerStatus("peer1")
+		return pings.Load() > 0 && status == NodeAlive
+	})
+	if m.ring.GetVersion() != ringVersionBefore {
+		t.Error("a failed heartbeat with a successful probe should not change the ring")
+	}
+}
+
+func TestHeartbeat_Failure_ProbeFails_MarksDead(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1", NodeAlive, 100)) // nothing listens on port 1
+
+	p, _ := m.getPeer("peer1")
+	m.heartbeat(p)
+
+	waitForCond(t, time.Second, "peer marked dead", func() bool {
+		status, _ := m.peerStatus("peer1")
+		return status == NodeDead
+	})
 }
 
 func TestMergeState_HigherIncarnation_DeadToAlive(t *testing.T) {

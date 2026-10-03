@@ -18,7 +18,7 @@ const (
 	MsgForwardBatch                    // batched replication ops from a peer's replicator
 	MsgRebalance                       // bulk key migration during rebalance
 	MsgLeave                           // graceful departure announcement
-	MsgProbe                           // indirect reachability probe
+	MsgPing                            // direct liveness probe, answered with an empty ack
 )
 
 // Frame is the envelope wrapping every message on the wire, written and read

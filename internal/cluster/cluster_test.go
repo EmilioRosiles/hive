@@ -31,6 +31,7 @@ func newTestClusterRF(nodeID string, rf int) *Cluster {
 			NodeID:               nodeID,
 			ReplicationFactor:    rf,
 			RoutingTimeout:       time.Second,
+			GossipTimeout:        300 * time.Millisecond,
 			ReplicationQueueSize: 64,
 			ReplicationBatchSize: 16,
 			MemLimit:             256 << 20, // nonzero so this fixture's rebalancer isn't a no-op
@@ -157,6 +158,149 @@ func TestAddPeer_ReplicationFactorMismatch(t *testing.T) {
 	}
 	if err := m.addPeer(bad); err == nil {
 		t.Error("addPeer should return error on replication factor mismatch")
+	}
+}
+
+// -- suspect --
+
+// setStatus sets a peer's status directly, without starting a probe.
+func setStatus(m *Cluster, nodeID string, status NodeStatus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peers[nodeID].Status = status
+}
+
+func TestSuspect_KeepsRingAndClientWhileProbing(t *testing.T) {
+	release := make(chan struct{})
+	addr := startPeerServer(t, func(transport.MsgType, []byte) ([]byte, error) {
+		<-release
+		return nil, nil
+	})
+	m := newTestCluster("self")
+	m.cfg.GossipTimeout = 5 * time.Second
+	m.addPeer(ps("peer1", addr, NodeAlive, 100))
+	client, _ := m.getClient("peer1")
+	ringVersionBefore := m.ring.GetVersion()
+
+	m.markSuspect("peer1")
+
+	if status, _ := m.peerStatus("peer1"); status != NodeSuspect {
+		t.Errorf("status while probing: got %v, want NodeSuspect", status)
+	}
+	if m.ring.GetVersion() != ringVersionBefore {
+		t.Error("ring should not change while a peer is suspected")
+	}
+	if c, ok := m.getClient("peer1"); !ok || c != client {
+		t.Error("client should be kept while a peer is suspected")
+	}
+
+	close(release)
+	waitForCond(t, time.Second, "probe acked", func() bool {
+		status, _ := m.peerStatus("peer1")
+		return status == NodeAlive
+	})
+}
+
+func TestSuspect_IgnoresDeadPeer(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
+	m.markDead("peer1")
+
+	m.markSuspect("peer1")
+
+	if status, _ := m.peerStatus("peer1"); status != NodeDead {
+		t.Errorf("status: got %v, want NodeDead", status)
+	}
+}
+
+func TestAddPeer_KeepsSuspect(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100))
+	client, _ := m.getClient("peer1")
+	setStatus(m, "peer1", NodeSuspect)
+	ringVersionBefore := m.ring.GetVersion()
+
+	m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 101))
+
+	if status, _ := m.peerStatus("peer1"); status != NodeSuspect {
+		t.Errorf("status: got %v, want NodeSuspect (only the probe ends a suspicion)", status)
+	}
+	if m.ring.GetVersion() != ringVersionBefore {
+		t.Error("ring should not change for a suspect peer")
+	}
+	if c, _ := m.getClient("peer1"); c != client {
+		t.Error("a suspect peer should keep its existing client")
+	}
+}
+
+// startPeerServer serves handler on a random local port for the test's duration.
+func startPeerServer(t *testing.T, handler transport.Handler) string {
+	t.Helper()
+	srv, err := transport.NewServer("127.0.0.1:0", handler, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() { srv.Close() })
+	return srv.Addr().String()
+}
+
+func TestProbe_Ack_MarksAlive(t *testing.T) {
+	addr := startPeerServer(t, func(transport.MsgType, []byte) ([]byte, error) { return nil, nil })
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", addr, NodeAlive, 100))
+	setStatus(m, "peer1", NodeSuspect)
+
+	m.probe("peer1")
+
+	if status, _ := m.peerStatus("peer1"); status != NodeAlive {
+		t.Errorf("status: got %v, want NodeAlive", status)
+	}
+}
+
+func TestProbe_Rejected_MarksAlive(t *testing.T) {
+	addr := startPeerServer(t, func(transport.MsgType, []byte) ([]byte, error) { return nil, errors.New("unknown message type") })
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", addr, NodeAlive, 100))
+	setStatus(m, "peer1", NodeSuspect)
+
+	m.probe("peer1")
+
+	if status, _ := m.peerStatus("peer1"); status != NodeAlive {
+		t.Errorf("status: got %v, want NodeAlive (a rejection proves the peer is up)", status)
+	}
+}
+
+func TestProbe_NoAnswer_MarksDead(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1", NodeAlive, 100)) // nothing listens on port 1
+	setStatus(m, "peer1", NodeSuspect)
+
+	m.probe("peer1")
+
+	if status, _ := m.peerStatus("peer1"); status != NodeDead {
+		t.Errorf("status: got %v, want NodeDead", status)
+	}
+	if _, ok := m.getClient("peer1"); ok {
+		t.Error("client should be removed once the peer is Dead")
+	}
+}
+
+// The peer turns Dead (e.g. from a Dead rumour) while the ping is in flight.
+// Only the status is flipped, so the client stays open and the ack arrives.
+func TestProbe_Ack_DoesNotReviveDeadPeer(t *testing.T) {
+	m := newTestCluster("self")
+	addr := startPeerServer(t, func(transport.MsgType, []byte) ([]byte, error) {
+		setStatus(m, "peer1", NodeDead)
+		return nil, nil
+	})
+	m.addPeer(ps("peer1", addr, NodeAlive, 100))
+	setStatus(m, "peer1", NodeSuspect)
+
+	m.probe("peer1")
+
+	if status, _ := m.peerStatus("peer1"); status != NodeDead {
+		t.Errorf("status: got %v, want NodeDead", status)
 	}
 }
 

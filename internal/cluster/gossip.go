@@ -51,7 +51,7 @@ func (m *Cluster) startGossip() {
 }
 
 // heartbeat sends this node's view of the cluster to each target peer.
-// Peers that fail to respond are removed from the cluster.
+// Peers that fail to respond are suspected and probed.
 func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 	if len(targets) == 0 {
 		return
@@ -76,7 +76,7 @@ func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 		cancel()
 		if err != nil {
 			m.logger.Warn("gossip: heartbeat failed", "node", p.NodeID, "err", err)
-			m.markDead(p.NodeID)
+			m.markSuspect(p.NodeID)
 			continue
 		}
 
@@ -149,7 +149,7 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 		if localStatus, ok := m.applyIncarnation(local, rs.Incarnation); ok {
 			switch NodeStatus(rs.Status) {
 			case NodeDead:
-				if localStatus == NodeAlive {
+				if localStatus != NodeDead {
 					m.markDead(rs.NodeID)
 				}
 			case NodeAlive:

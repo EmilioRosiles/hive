@@ -183,7 +183,7 @@ func (c *Cluster) Members() []Member {
 		out = append(out, Member{
 			NodeID:            p.NodeID,
 			Addr:              p.Addr,
-			Alive:             p.Status == cluster.NodeAlive,
+			Alive:             p.Status != cluster.NodeDead,
 			ReplicationFactor: p.ReplicationFactor,
 			MemLimit:          p.MemLimit,
 			MemUsed:           p.MemUsed,
@@ -197,7 +197,7 @@ func (c *Cluster) Members() []Member {
 func (c *Cluster) AliveCount() int {
 	alive := 1 // this node
 	for _, p := range c.internal.Peers() {
-		if p.Status == cluster.NodeAlive {
+		if p.Status != cluster.NodeDead {
 			alive++
 		}
 	}

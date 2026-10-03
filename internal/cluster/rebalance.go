@@ -156,7 +156,7 @@ func (m *Cluster) sendRebalanceBatch(nodeID string, entries []transport.Rebalanc
 		}
 		if _, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgRebalance, Payload: payload}); err != nil {
 			m.logger.Warn("rebalance: send failed", "node", nodeID, "err", err)
-			m.markDead(nodeID)
+			m.markSuspect(nodeID)
 			return
 		}
 	}

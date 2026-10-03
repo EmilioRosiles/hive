@@ -45,7 +45,7 @@ func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int
 		RebalanceBatchSize:   128,
 		ReplicationQueueSize: 64,
 		ReplicationBatchSize: 16,
-		CleanupInterval:      time.Second,
+		CleanupInterval:      time.Minute, // keep dead-peer tombstones so evicted peers can't be re-added from gossip
 		Clustered:            true,
 		Logger:               slog.Default(),
 	})
@@ -109,7 +109,7 @@ func TestCluster_UngracefulFailure_DetectedAndDataSurvives(t *testing.T) {
 	killUngracefully(n3)
 
 	// n1 and n2 must detect this via the real heartbeat-timeout path
-	// (Cluster.heartbeat -> client.Send error -> markDead).
+	// (Cluster.heartbeat -> client.Send error -> suspect -> probe -> markDead).
 	waitForCond(t, 3*time.Second, "surviving nodes detect the crash", func() bool {
 		s1, ok1 := n1.peerStatus(n3.cfg.NodeID)
 		s2, ok2 := n2.peerStatus(n3.cfg.NodeID)

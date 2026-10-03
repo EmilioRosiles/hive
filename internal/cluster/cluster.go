@@ -3,7 +3,9 @@
 package cluster
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -20,8 +22,9 @@ import (
 type NodeStatus uint8
 
 const (
-	NodeAlive NodeStatus = 0
-	NodeDead  NodeStatus = 1
+	NodeAlive   NodeStatus = 0
+	NodeDead    NodeStatus = 1
+	NodeSuspect NodeStatus = 2
 )
 
 // Config holds all configuration for the cluster manager.
@@ -176,7 +179,7 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 
 	if p, ok := m.peers[ps.NodeID]; ok {
 		p.MemUsed = ps.MemUsed
-		if p.Status != NodeAlive {
+		if p.Status == NodeDead {
 			p.Status = NodeAlive
 			p.Incarnation = ps.Incarnation
 			m.ring.Add(ps.NodeID, vNodeCount)
@@ -205,6 +208,22 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	return nil
 }
 
+// markSuspect marks an Alive peer Suspect and probes it in the background, leaving
+// its ring position, client and replicator in place. Only the probe ends the
+// suspicion, by marking the peer Alive or Dead.
+func (m *Cluster) markSuspect(nodeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	p, ok := m.peers[nodeID]
+	if !ok || p.Status != NodeAlive {
+		return
+	}
+	p.Status = NodeSuspect
+	m.logger.Warn("cluster: peer suspected", "node", nodeID)
+	go m.probe(nodeID)
+}
+
 // markDead promotes a peer to the Dead state. Its client is closed in the
 // background, since Close can wait on an in-flight dial.
 func (m *Cluster) markDead(nodeID string) {
@@ -227,6 +246,36 @@ func (m *Cluster) markDead(nodeID string) {
 	}
 	go m.rebalancer.schedule()
 	m.logger.Warn("cluster: peer marked dead", "node", nodeID)
+}
+
+// probe pings a Suspect peer and marks it Alive on an ack, or Dead otherwise.
+func (m *Cluster) probe(nodeID string) {
+	if err := m.ping(nodeID); err != nil {
+		m.logger.Warn("cluster: probe failed", "node", nodeID, "err", err)
+		m.markDead(nodeID)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p, ok := m.peers[nodeID]; ok && p.Status == NodeSuspect {
+		p.Status = NodeAlive
+		m.logger.Info("cluster: suspect peer is alive", "node", nodeID)
+	}
+}
+
+// ping sends a MsgPing to nodeID and waits up to GossipTimeout for an answer.
+// A rejection still proves the peer is up, so only network failures are errors.
+func (m *Cluster) ping(nodeID string) error {
+	client, ok := m.getClient(nodeID)
+	if !ok {
+		return fmt.Errorf("cluster: no client for node %s", nodeID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.GossipTimeout)
+	defer cancel()
+	if _, err := client.Send(ctx, transport.Frame{Type: transport.MsgPing}); err != nil && !errors.Is(err, transport.ErrRejected) {
+		return err
+	}
+	return nil
 }
 
 // startJanitor runs the cleanup loop until the node shuts down.
