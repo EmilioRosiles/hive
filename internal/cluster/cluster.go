@@ -5,7 +5,6 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -40,6 +39,9 @@ type Config struct {
 	GossipInterval       time.Duration
 	GossipFanout         int
 	GossipTimeout        time.Duration
+	ProbeTimeout         time.Duration
+	ProbeHelpers         int
+	ProbeInterval        time.Duration
 	RebalanceDebounce    time.Duration
 	RebalanceBatchSize   int
 	ReplicationQueueSize int
@@ -224,6 +226,16 @@ func (m *Cluster) markSuspect(nodeID string) {
 	go m.probe(nodeID)
 }
 
+// markAlive moves a Suspect peer back to Alive.
+func (m *Cluster) markAlive(nodeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p, ok := m.peers[nodeID]; ok && p.Status == NodeSuspect {
+		p.Status = NodeAlive
+		m.logger.Info("cluster: suspect peer is alive", "node", nodeID)
+	}
+}
+
 // markDead promotes a peer to the Dead state. Its client is closed in the
 // background, since Close can wait on an in-flight dial.
 func (m *Cluster) markDead(nodeID string) {
@@ -248,34 +260,104 @@ func (m *Cluster) markDead(nodeID string) {
 	m.logger.Warn("cluster: peer marked dead", "node", nodeID)
 }
 
-// probe pings a Suspect peer and marks it Alive on an ack, or Dead otherwise.
+// probeResult is the outcome of asking a helper to ping a peer.
+type probeResult uint8
+
+const (
+	probeNoAnswer probeResult = iota
+	probeNack
+	probeAck
+)
+
+// Ping hops: the first payload byte of a MsgPing, followed by the target node ID.
+const (
+	pingDirect byte = iota
+	pingRelay
+)
+
+// probe resolves a Suspect peer with a direct ping, then indirect pings through
+// up to ProbeHelpers helpers. It retries every ProbeInterval while no helper answers.
 func (m *Cluster) probe(nodeID string) {
-	if err := m.ping(nodeID); err != nil {
-		m.logger.Warn("cluster: probe failed", "node", nodeID, "err", err)
-		m.markDead(nodeID)
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if p, ok := m.peers[nodeID]; ok && p.Status == NodeSuspect {
-		p.Status = NodeAlive
-		m.logger.Info("cluster: suspect peer is alive", "node", nodeID)
+	for {
+		if status, _ := m.peerStatus(nodeID); status != NodeSuspect {
+			return
+		}
+		if m.ping(nodeID, nodeID) == probeAck {
+			m.markAlive(nodeID)
+			return
+		}
+		helpers := m.randomAlivePeers(m.cfg.ProbeHelpers)
+		if len(helpers) == 0 {
+			m.markDead(nodeID)
+			return
+		}
+		results := make(chan probeResult, len(helpers))
+		for _, h := range helpers {
+			go func() { results <- m.ping(h.NodeID, nodeID) }()
+		}
+		result := probeNoAnswer
+		for range helpers {
+			result = max(result, <-results)
+			if result == probeAck {
+				break
+			}
+		}
+		switch result {
+		case probeAck:
+			m.logger.Warn("cluster: peer reachable only through helpers", "node", nodeID)
+			m.markAlive(nodeID)
+			return
+		case probeNack:
+			m.markDead(nodeID)
+			return
+		}
+		m.logger.Warn("cluster: no helper answered, retrying probe", "node", nodeID)
+		select {
+		case <-time.After(m.cfg.ProbeInterval):
+		case <-m.stopCh:
+			return
+		}
 	}
 }
 
-// ping sends a MsgPing to nodeID and waits up to GossipTimeout for an answer.
-// A rejection still proves the peer is up, so only network failures are errors.
-func (m *Cluster) ping(nodeID string) error {
-	client, ok := m.getClient(nodeID)
+// ping asks via whether target is up; via == target is a direct ping, waiting
+// ProbeTimeout. A relay ping waits twice that, so the helper's own ping fits.
+func (m *Cluster) ping(via, target string) probeResult {
+	client, ok := m.getClient(via)
 	if !ok {
-		return fmt.Errorf("cluster: no client for node %s", nodeID)
+		return probeNoAnswer
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.GossipTimeout)
+	hop, timeout := pingDirect, m.cfg.ProbeTimeout
+	if via != target {
+		hop, timeout = pingRelay, 2*m.cfg.ProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if _, err := client.Send(ctx, transport.Frame{Type: transport.MsgPing}); err != nil && !errors.Is(err, transport.ErrRejected) {
-		return err
+	resp, err := client.Send(ctx, transport.Frame{Type: transport.MsgPing, Payload: append([]byte{hop}, target...)})
+	if err != nil {
+		return probeNoAnswer
 	}
-	return nil
+	if len(resp.Payload) == 1 && probeResult(resp.Payload[0]) == probeAck {
+		return probeAck
+	}
+	return probeNack
+}
+
+// handlePing answers a MsgPing with ack or nack. A direct ping is acked only if
+// we are its target; a relay ping is answered by pinging the target directly.
+func (m *Cluster) handlePing(payload []byte) []byte {
+	if len(payload) < 2 {
+		return []byte{byte(probeNack)}
+	}
+	target := string(payload[1:])
+	ack := target == m.cfg.NodeID
+	if payload[0] == pingRelay {
+		ack = m.ping(target, target) == probeAck
+	}
+	if !ack {
+		return []byte{byte(probeNack)}
+	}
+	return []byte{byte(probeAck)}
 }
 
 // startJanitor runs the cleanup loop until the node shuts down.

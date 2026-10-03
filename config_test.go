@@ -1,6 +1,9 @@
 package hive
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestConfig_MemLimit_UnsetDefaultsToSystemMemory(t *testing.T) {
 	var cfg Config
@@ -44,5 +47,19 @@ func TestByteUnits(t *testing.T) {
 	}
 	if got := *Bytes(4 * GB); got != 4*1024*1024*1024 {
 		t.Errorf("Bytes(4*GB): got %d, want %d", got, 4*1024*1024*1024)
+	}
+}
+
+func TestConfig_ProbeDefaults(t *testing.T) {
+	var c Config
+	c.applyDefaults()
+	if c.ProbeTimeout != 300*time.Millisecond || c.ProbeHelpers != 3 || c.ProbeInterval != time.Second {
+		t.Errorf("got ProbeTimeout=%v ProbeHelpers=%d ProbeInterval=%v, want 300ms, 3, 1s", c.ProbeTimeout, c.ProbeHelpers, c.ProbeInterval)
+	}
+
+	c = Config{ProbeTimeout: time.Second, ProbeHelpers: 5, ProbeInterval: time.Minute}
+	c.applyDefaults()
+	if c.ProbeTimeout != time.Second || c.ProbeHelpers != 5 || c.ProbeInterval != time.Minute {
+		t.Errorf("explicit values overwritten: got %v, %d, %v", c.ProbeTimeout, c.ProbeHelpers, c.ProbeInterval)
 	}
 }

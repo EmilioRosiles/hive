@@ -61,7 +61,7 @@ func TestHeartbeat_Failure_ProbeAcks_StaysAlive(t *testing.T) {
 	addr := startPeerServer(t, func(msgType transport.MsgType, _ []byte) ([]byte, error) {
 		if msgType == transport.MsgPing {
 			pings.Add(1)
-			return nil, nil
+			return pingAck, nil
 		}
 		<-release // heartbeats hang past GossipTimeout
 		return nil, nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +33,9 @@ func newTestClusterRF(nodeID string, rf int) *Cluster {
 			ReplicationFactor:    rf,
 			RoutingTimeout:       time.Second,
 			GossipTimeout:        300 * time.Millisecond,
+			ProbeTimeout:         300 * time.Millisecond,
+			ProbeHelpers:         3,
+			ProbeInterval:        100 * time.Millisecond,
 			ReplicationQueueSize: 64,
 			ReplicationBatchSize: 16,
 			MemLimit:             256 << 20, // nonzero so this fixture's rebalancer isn't a no-op
@@ -174,10 +178,10 @@ func TestSuspect_KeepsRingAndClientWhileProbing(t *testing.T) {
 	release := make(chan struct{})
 	addr := startPeerServer(t, func(transport.MsgType, []byte) ([]byte, error) {
 		<-release
-		return nil, nil
+		return pingAck, nil
 	})
 	m := newTestCluster("self")
-	m.cfg.GossipTimeout = 5 * time.Second
+	m.cfg.ProbeTimeout = 5 * time.Second
 	m.addPeer(ps("peer1", addr, NodeAlive, 100))
 	client, _ := m.getClient("peer1")
 	ringVersionBefore := m.ring.GetVersion()
@@ -245,8 +249,17 @@ func startPeerServer(t *testing.T, handler transport.Handler) string {
 	return srv.Addr().String()
 }
 
+// startNodeServer serves a test node with nodeID, answering frames like a real peer.
+func startNodeServer(t *testing.T, nodeID string) string {
+	t.Helper()
+	return startPeerServer(t, newTestCluster(nodeID).handleFrame)
+}
+
+// pingAck is the payload of an acked MsgPing.
+var pingAck = []byte{byte(probeAck)}
+
 func TestProbe_Ack_MarksAlive(t *testing.T) {
-	addr := startPeerServer(t, func(transport.MsgType, []byte) ([]byte, error) { return nil, nil })
+	addr := startNodeServer(t, "peer1")
 	m := newTestCluster("self")
 	m.addPeer(ps("peer1", addr, NodeAlive, 100))
 	setStatus(m, "peer1", NodeSuspect)
@@ -255,19 +268,6 @@ func TestProbe_Ack_MarksAlive(t *testing.T) {
 
 	if status, _ := m.peerStatus("peer1"); status != NodeAlive {
 		t.Errorf("status: got %v, want NodeAlive", status)
-	}
-}
-
-func TestProbe_Rejected_MarksAlive(t *testing.T) {
-	addr := startPeerServer(t, func(transport.MsgType, []byte) ([]byte, error) { return nil, errors.New("unknown message type") })
-	m := newTestCluster("self")
-	m.addPeer(ps("peer1", addr, NodeAlive, 100))
-	setStatus(m, "peer1", NodeSuspect)
-
-	m.probe("peer1")
-
-	if status, _ := m.peerStatus("peer1"); status != NodeAlive {
-		t.Errorf("status: got %v, want NodeAlive (a rejection proves the peer is up)", status)
 	}
 }
 
@@ -286,13 +286,27 @@ func TestProbe_NoAnswer_MarksDead(t *testing.T) {
 	}
 }
 
+// Y restarted on X's old address with a new node ID: it must not answer for X.
+func TestProbe_OtherNodeOnAddress_MarksDead(t *testing.T) {
+	addr := startNodeServer(t, "Y")
+	m := newTestCluster("self")
+	m.addPeer(ps("X", addr, NodeAlive, 100))
+	setStatus(m, "X", NodeSuspect)
+
+	m.probe("X")
+
+	if status, _ := m.peerStatus("X"); status != NodeDead {
+		t.Errorf("status: got %v, want NodeDead (Y answered for X)", status)
+	}
+}
+
 // The peer turns Dead (e.g. from a Dead rumour) while the ping is in flight.
 // Only the status is flipped, so the client stays open and the ack arrives.
 func TestProbe_Ack_DoesNotReviveDeadPeer(t *testing.T) {
 	m := newTestCluster("self")
 	addr := startPeerServer(t, func(transport.MsgType, []byte) ([]byte, error) {
 		setStatus(m, "peer1", NodeDead)
-		return nil, nil
+		return pingAck, nil
 	})
 	m.addPeer(ps("peer1", addr, NodeAlive, 100))
 	setStatus(m, "peer1", NodeSuspect)
@@ -302,6 +316,122 @@ func TestProbe_Ack_DoesNotReviveDeadPeer(t *testing.T) {
 	if status, _ := m.peerStatus("peer1"); status != NodeDead {
 		t.Errorf("status: got %v, want NodeDead", status)
 	}
+}
+
+// helperServer answers relayed pings with result after delay, counting them.
+func helperServer(t *testing.T, result probeResult, delay func(n int32) time.Duration) (string, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	addr := startPeerServer(t, func(msgType transport.MsgType, payload []byte) ([]byte, error) {
+		if msgType != transport.MsgPing || payload[0] != pingRelay {
+			return nil, nil
+		}
+		time.Sleep(delay(calls.Add(1)))
+		return []byte{byte(result)}, nil
+	})
+	return addr, &calls
+}
+
+func noDelay(int32) time.Duration { return 0 }
+
+func TestHandlePing(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("up", startNodeServer(t, "up"), NodeAlive, 100))
+	m.addPeer(ps("down", "127.0.0.1:1", NodeAlive, 100)) // nothing listens on port 1
+
+	tests := []struct {
+		name   string
+		hop    byte
+		target string
+		want   probeResult
+	}{
+		{"direct, we are the target", pingDirect, "self", probeAck},
+		{"direct, another node", pingDirect, "other", probeNack},
+		{"relay, reachable target", pingRelay, "up", probeAck},
+		{"relay, unreachable target", pingRelay, "down", probeNack},
+		{"relay, unknown target", pingRelay, "unknown", probeNack},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := m.handlePing(append([]byte{tt.hop}, tt.target...))
+			if len(got) != 1 || probeResult(got[0]) != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A relayed ping must reach the target as a direct ping, or it could be relayed again.
+func TestHandlePing_RelaysAsDirectPing(t *testing.T) {
+	payloads := make(chan []byte, 1)
+	addr := startPeerServer(t, func(_ transport.MsgType, payload []byte) ([]byte, error) {
+		payloads <- payload
+		return pingAck, nil
+	})
+	m := newTestCluster("self")
+	m.addPeer(ps("target", addr, NodeAlive, 100))
+
+	m.handlePing(append([]byte{pingRelay}, "target"...))
+
+	if got, want := <-payloads, append([]byte{pingDirect}, "target"...); string(got) != string(want) {
+		t.Errorf("target received payload %q, want %q", got, want)
+	}
+}
+
+func TestProbe_HelperAcks_MarksAlive(t *testing.T) {
+	helper, _ := helperServer(t, probeAck, noDelay)
+	m := newTestCluster("self")
+	m.addPeer(ps("target", "127.0.0.1:1", NodeAlive, 100)) // unreachable from us
+	m.addPeer(ps("helper", helper, NodeAlive, 100))
+	setStatus(m, "target", NodeSuspect)
+	ringVersionBefore := m.ring.GetVersion()
+
+	m.probe("target")
+
+	if status, _ := m.peerStatus("target"); status != NodeAlive {
+		t.Errorf("status: got %v, want NodeAlive", status)
+	}
+	if m.ring.GetVersion() != ringVersionBefore {
+		t.Error("ring should not change when a helper reaches the peer")
+	}
+}
+
+func TestProbe_HelperNacks_MarksDead(t *testing.T) {
+	helper, _ := helperServer(t, probeNack, noDelay)
+	m := newTestCluster("self")
+	m.addPeer(ps("target", "127.0.0.1:1", NodeAlive, 100))
+	m.addPeer(ps("helper", helper, NodeAlive, 100))
+	setStatus(m, "target", NodeSuspect)
+
+	m.probe("target")
+
+	if status, _ := m.peerStatus("target"); status != NodeDead {
+		t.Errorf("status: got %v, want NodeDead", status)
+	}
+}
+
+// The helper doesn't answer the first round in time, so the probe must keep
+// the peer Suspect and retry instead of declaring it Dead.
+func TestProbe_NoHelperAnswers_StaysSuspectAndRetries(t *testing.T) {
+	helper, calls := helperServer(t, probeAck, func(n int32) time.Duration {
+		if n == 1 {
+			return 500 * time.Millisecond
+		}
+		return 0
+	})
+	m := newTestCluster("self")
+	m.cfg.ProbeTimeout = 50 * time.Millisecond
+	m.cfg.ProbeInterval = 50 * time.Millisecond
+	m.addPeer(ps("target", "127.0.0.1:1", NodeAlive, 100))
+	m.addPeer(ps("helper", helper, NodeAlive, 100))
+	setStatus(m, "target", NodeSuspect)
+
+	go m.probe("target")
+
+	waitForCond(t, 2*time.Second, "probe retried and helper acked", func() bool {
+		status, _ := m.peerStatus("target")
+		return calls.Load() >= 2 && status == NodeAlive
+	})
 }
 
 // -- markDead --

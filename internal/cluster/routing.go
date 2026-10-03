@@ -22,7 +22,7 @@ func (m *Cluster) handleFrame(msgType transport.MsgType, payload []byte) ([]byte
 	case transport.MsgLeave:
 		return nil, m.handleLeave(payload)
 	case transport.MsgPing:
-		return nil, nil
+		return m.handlePing(payload), nil
 	default:
 		return nil, fmt.Errorf("handler: unknown message type %d", msgType)
 	}

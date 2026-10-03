@@ -79,6 +79,18 @@ type Config struct {
 	// Defaults to 300ms.
 	GossipTimeout time.Duration
 
+	// ProbeTimeout is how long a direct ping to a suspected peer may take;
+	// pings relayed through a helper get twice as long. Defaults to 300ms.
+	ProbeTimeout time.Duration
+
+	// ProbeHelpers is how many alive peers are asked to ping a suspected peer
+	// when a direct ping fails. Defaults to 3.
+	ProbeHelpers int
+
+	// ProbeInterval is how long a probe waits before retrying when no helper
+	// answered. Defaults to 1s.
+	ProbeInterval time.Duration
+
 	// RebalanceDebounce is the delay after a topology change before
 	// rebalancing starts, to let the cluster stabilize.
 	// Defaults to 500ms.
@@ -144,6 +156,9 @@ func defaultConfig() Config {
 		GossipInterval:       5 * time.Second,
 		GossipFanout:         3,
 		GossipTimeout:        300 * time.Millisecond,
+		ProbeTimeout:         300 * time.Millisecond,
+		ProbeHelpers:         3,
+		ProbeInterval:        1 * time.Second,
 		RebalanceDebounce:    500 * time.Millisecond,
 		RebalanceBatchSize:   128,
 		ReplicationQueueSize: 4096,
@@ -180,6 +195,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.GossipTimeout == 0 {
 		c.GossipTimeout = d.GossipTimeout
+	}
+	if c.ProbeTimeout == 0 {
+		c.ProbeTimeout = d.ProbeTimeout
+	}
+	if c.ProbeHelpers == 0 {
+		c.ProbeHelpers = d.ProbeHelpers
+	}
+	if c.ProbeInterval == 0 {
+		c.ProbeInterval = d.ProbeInterval
 	}
 	if c.RebalanceDebounce == 0 {
 		c.RebalanceDebounce = d.RebalanceDebounce
