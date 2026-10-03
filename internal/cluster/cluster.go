@@ -44,6 +44,7 @@ type Config struct {
 	ProbeInterval        time.Duration
 	RebalanceDebounce    time.Duration
 	RebalanceBatchSize   int
+	RebalanceTimeout     time.Duration
 	ReplicationQueueSize int
 	ReplicationBatchSize int
 	CleanupInterval      time.Duration

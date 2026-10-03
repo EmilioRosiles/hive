@@ -79,6 +79,7 @@ func NewNode(cfg Config) (*Node, error) {
 		ProbeInterval:        cfg.ProbeInterval,
 		RebalanceDebounce:    cfg.RebalanceDebounce,
 		RebalanceBatchSize:   cfg.RebalanceBatchSize,
+		RebalanceTimeout:     cfg.RebalanceTimeout,
 		ReplicationQueueSize: cfg.ReplicationQueueSize,
 		ReplicationBatchSize: cfg.ReplicationBatchSize,
 		CleanupInterval:      cfg.CleanupInterval,

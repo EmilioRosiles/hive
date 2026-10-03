@@ -100,6 +100,10 @@ type Config struct {
 	// frame. Defaults to 128.
 	RebalanceBatchSize int
 
+	// RebalanceTimeout is how long one rebalance frame may take before the
+	// migration is retried on the next rebalance run. Defaults to 10s.
+	RebalanceTimeout time.Duration
+
 	// ReplicationQueueSize is the max number of queued-but-unsent replication
 	// writes held per peer before enqueuing blocks (backpressure).
 	// Defaults to 4096.
@@ -161,6 +165,7 @@ func defaultConfig() Config {
 		ProbeInterval:        1 * time.Second,
 		RebalanceDebounce:    500 * time.Millisecond,
 		RebalanceBatchSize:   128,
+		RebalanceTimeout:     10 * time.Second,
 		ReplicationQueueSize: 4096,
 		ReplicationBatchSize: 256,
 		CleanupInterval:      30 * time.Second,
@@ -210,6 +215,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RebalanceBatchSize == 0 {
 		c.RebalanceBatchSize = d.RebalanceBatchSize
+	}
+	if c.RebalanceTimeout == 0 {
+		c.RebalanceTimeout = d.RebalanceTimeout
 	}
 	if c.ReplicationQueueSize == 0 {
 		c.ReplicationQueueSize = d.ReplicationQueueSize

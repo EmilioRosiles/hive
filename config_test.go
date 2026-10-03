@@ -63,3 +63,16 @@ func TestConfig_ProbeDefaults(t *testing.T) {
 		t.Errorf("explicit values overwritten: got %v, %d, %v", c.ProbeTimeout, c.ProbeHelpers, c.ProbeInterval)
 	}
 }
+
+func TestConfig_RebalanceTimeoutDefault(t *testing.T) {
+	var c Config
+	c.applyDefaults()
+	if c.RebalanceTimeout != 10*time.Second {
+		t.Errorf("got %v, want 10s", c.RebalanceTimeout)
+	}
+	c = Config{RebalanceTimeout: time.Minute}
+	c.applyDefaults()
+	if c.RebalanceTimeout != time.Minute {
+		t.Errorf("explicit value overwritten: got %v", c.RebalanceTimeout)
+	}
+}

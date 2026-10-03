@@ -46,6 +46,7 @@ func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int
 		ProbeInterval:        100 * time.Millisecond,
 		RebalanceDebounce:    50 * time.Millisecond,
 		RebalanceBatchSize:   128,
+		RebalanceTimeout:     time.Second,
 		ReplicationQueueSize: 64,
 		ReplicationBatchSize: 16,
 		CleanupInterval:      time.Minute, // keep dead-peer tombstones so evicted peers can't be re-added from gossip

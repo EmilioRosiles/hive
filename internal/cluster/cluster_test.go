@@ -36,6 +36,8 @@ func newTestClusterRF(nodeID string, rf int) *Cluster {
 			ProbeTimeout:         300 * time.Millisecond,
 			ProbeHelpers:         3,
 			ProbeInterval:        100 * time.Millisecond,
+			RebalanceBatchSize:   16,
+			RebalanceTimeout:     time.Second,
 			ReplicationQueueSize: 64,
 			ReplicationBatchSize: 16,
 			MemLimit:             256 << 20, // nonzero so this fixture's rebalancer isn't a no-op
