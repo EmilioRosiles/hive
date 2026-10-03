@@ -103,6 +103,7 @@ func (m *Cluster) bootstrap(addr string) {
 		return
 	}
 	client := m.newClient(addr)
+	defer client.Close()
 	resp, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgHeartbeat, Payload: payload})
 	if err != nil {
 		if errors.Is(err, transport.ErrRejected) {
@@ -228,6 +229,7 @@ func (m *Cluster) announceLeave() {
 		go func(addr string) {
 			defer wg.Done()
 			c := m.newClient(addr)
+			defer c.Close()
 			c.Send(context.Background(), frame)
 		}(p.Addr)
 	}

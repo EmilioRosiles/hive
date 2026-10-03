@@ -18,6 +18,8 @@ const defaultTimeout = 3 * time.Second
 // request is safe to retry.
 var ErrUnsent = errors.New("transport: frame not sent")
 
+var errClientClosed = errors.New("transport: client closed")
+
 // Client maintains a small pool of persistent connections to a peer, round-
 // robin selected so concurrent sends don't serialize on one connection.
 type Client struct {
@@ -25,6 +27,7 @@ type Client struct {
 	timeout   time.Duration
 	tlsConfig *tls.Config
 	mu        sync.Mutex
+	closed    bool
 	muxes     []atomic.Pointer[mux]
 	next      atomic.Uint32
 	logger    *slog.Logger
@@ -44,7 +47,7 @@ func (c *Client) Send(ctx context.Context, frame Frame) (Frame, error) {
 	for attempt := range 3 {
 		m, err := c.getMux(slot)
 		if err != nil {
-			if attempt < 2 {
+			if attempt < 2 && !errors.Is(err, errClientClosed) {
 				if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
 					return Frame{}, serr
 				}
@@ -78,6 +81,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // getMux returns the live mux for slot, dialing a new connection if needed.
+// It fails with errClientClosed once Close has been called.
 func (c *Client) getMux(slot int) (*mux, error) {
 	if m := c.muxes[slot].Load(); m != nil && !m.closed() {
 		return m, nil
@@ -88,6 +92,9 @@ func (c *Client) getMux(slot int) (*mux, error) {
 
 	if m := c.muxes[slot].Load(); m != nil && !m.closed() {
 		return m, nil
+	}
+	if c.closed {
+		return nil, errClientClosed
 	}
 
 	var conn net.Conn
@@ -110,8 +117,11 @@ func (c *Client) invalidate(slot int, dead *mux) {
 	c.muxes[slot].CompareAndSwap(dead, nil)
 }
 
-// Close shuts down every connection in the pool.
+// Close shuts down every connection in the pool and stops it from dialing new ones.
 func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
 	for i := range c.muxes {
 		if m := c.muxes[i].Swap(nil); m != nil {
 			m.shutdown(nil)

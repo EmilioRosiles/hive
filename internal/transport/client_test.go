@@ -194,6 +194,25 @@ func TestClient_Pool_ReconnectsOnlyDeadSlot(t *testing.T) {
 	}
 }
 
+func TestClient_Pool_SendAfterClose_DoesNotRedial(t *testing.T) {
+	handler := func(msgType MsgType, payload []byte) ([]byte, error) { return payload, nil }
+	s := startTestServer(t, handler)
+
+	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
+	if _, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	client.Close()
+
+	_, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")})
+	if !errors.Is(err, ErrUnsent) {
+		t.Errorf("got %v, want an error wrapping ErrUnsent", err)
+	}
+	if m := client.muxes[0].Load(); m != nil {
+		t.Error("Send after Close dialed a new connection")
+	}
+}
+
 func TestClient_Send_DialFailure_WrapsErrUnsent(t *testing.T) {
 	client := NewClient("127.0.0.1:1", nil, 1, slog.Default()) // nothing listens on port 1
 	defer client.Close()

@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"testing"
@@ -159,6 +161,26 @@ func TestAddPeer_ReplicationFactorMismatch(t *testing.T) {
 }
 
 // -- markDead --
+
+func TestMarkDead_ClosesClient(t *testing.T) {
+	fp := newFakePeer(t)
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", fp.addr, NodeAlive, 100))
+	c, _ := m.getClient("peer1")
+
+	payload, _ := transport.Encode(transport.ForwardBatch{})
+	frame := transport.Frame{Type: transport.MsgForwardBatch, Payload: payload}
+	if _, err := c.Send(context.Background(), frame); err != nil {
+		t.Fatalf("Send before markDead: %v", err)
+	}
+
+	m.markDead("peer1")
+
+	waitForCond(t, time.Second, "client closed", func() bool {
+		_, err := c.Send(context.Background(), frame)
+		return errors.Is(err, transport.ErrUnsent)
+	})
+}
 
 func TestMarkDead_AlivePeer(t *testing.T) {
 	m := newTestCluster("self")

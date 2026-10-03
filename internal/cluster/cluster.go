@@ -205,7 +205,8 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	return nil
 }
 
-// markDead promotes a peer to the Dead state.
+// markDead promotes a peer to the Dead state. Its client is closed in the
+// background, since Close can wait on an in-flight dial.
 func (m *Cluster) markDead(nodeID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -216,7 +217,10 @@ func (m *Cluster) markDead(nodeID string) {
 	}
 	p.Status = NodeDead
 	m.ring.Remove(nodeID)
-	delete(m.clients, nodeID)
+	if c, ok := m.clients[nodeID]; ok {
+		go c.Close()
+		delete(m.clients, nodeID)
+	}
 	if rep, ok := m.replicators[nodeID]; ok {
 		rep.stop()
 		delete(m.replicators, nodeID)
