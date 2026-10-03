@@ -83,6 +83,7 @@ func NewNode(cfg Config) (*Node, error) {
 		ReplicationQueueSize: cfg.ReplicationQueueSize,
 		ReplicationBatchSize: cfg.ReplicationBatchSize,
 		CleanupInterval:      cfg.CleanupInterval,
+		DeadRetention:        cfg.DeadRetention,
 		Clustered:            cfg.Mode == ModeCluster,
 		TLSConfig:            cfg.TLSConfig,
 		Logger:               logger,

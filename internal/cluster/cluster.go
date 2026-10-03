@@ -48,6 +48,7 @@ type Config struct {
 	ReplicationQueueSize int
 	ReplicationBatchSize int
 	CleanupInterval      time.Duration
+	DeadRetention        time.Duration
 	Clustered            bool
 	TLSConfig            *tls.Config
 	Logger               *slog.Logger
@@ -63,6 +64,7 @@ type PeerInfo struct {
 	ReplicationFactor int
 	MemLimit          uint64
 	MemUsed           uint64
+	deadAt            time.Time
 }
 
 // Cluster owns the cluster state for this node.
@@ -248,6 +250,7 @@ func (m *Cluster) markDead(nodeID string) {
 		return
 	}
 	p.Status = NodeDead
+	p.deadAt = time.Now()
 	m.ring.Remove(nodeID)
 	if c, ok := m.clients[nodeID]; ok {
 		go c.Close()
@@ -377,11 +380,12 @@ func (m *Cluster) startJanitor() {
 	}
 }
 
+// evictDeadPeers forgets peers that have been Dead for at least DeadRetention.
 func (m *Cluster) evictDeadPeers() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for nodeID, p := range m.peers {
-		if p.Status == NodeDead {
+		if p.Status == NodeDead && time.Since(p.deadAt) >= m.cfg.DeadRetention {
 			delete(m.peers, nodeID)
 			m.logger.Info("cluster: evicted dead peer tombstone", "node", nodeID)
 		}

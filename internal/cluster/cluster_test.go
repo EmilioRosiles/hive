@@ -522,6 +522,26 @@ func TestEvictDeadPeers_RemovesDeadKeepsAlive(t *testing.T) {
 	}
 }
 
+func TestEvictDeadPeers_KeepsTombstoneForDeadRetention(t *testing.T) {
+	m := newTestCluster("self")
+	m.cfg.DeadRetention = time.Hour
+	m.addPeer(ps("dead", "127.0.0.1:1002", NodeAlive, 100))
+	m.markDead("dead")
+
+	m.evictDeadPeers()
+	if _, ok := m.getPeer("dead"); !ok {
+		t.Fatal("dead peer evicted before DeadRetention elapsed")
+	}
+
+	m.mu.Lock()
+	m.peers["dead"].deadAt = time.Now().Add(-time.Hour)
+	m.mu.Unlock()
+	m.evictDeadPeers()
+	if _, ok := m.getPeer("dead"); ok {
+		t.Error("dead peer should be evicted once DeadRetention elapsed")
+	}
+}
+
 func TestEvictDeadPeers_EmptyMap_NoOp(t *testing.T) {
 	m := newTestCluster("self")
 	m.evictDeadPeers() // should not panic

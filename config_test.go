@@ -76,3 +76,16 @@ func TestConfig_RebalanceTimeoutDefault(t *testing.T) {
 		t.Errorf("explicit value overwritten: got %v", c.RebalanceTimeout)
 	}
 }
+
+func TestConfig_DeadRetentionDefault(t *testing.T) {
+	c := Config{GossipInterval: 200 * time.Millisecond}
+	c.applyDefaults()
+	if c.DeadRetention != 2*time.Second {
+		t.Errorf("got %v, want 10x GossipInterval (2s)", c.DeadRetention)
+	}
+	c = Config{DeadRetention: time.Minute}
+	c.applyDefaults()
+	if c.DeadRetention != time.Minute {
+		t.Errorf("explicit value overwritten: got %v", c.DeadRetention)
+	}
+}

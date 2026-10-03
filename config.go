@@ -118,6 +118,10 @@ type Config struct {
 	// Default: 30s
 	CleanupInterval time.Duration
 
+	// DeadRetention is how long a dead peer is remembered before the janitor
+	// forgets it, so stale gossip can't bring it back. Defaults to 10× GossipInterval.
+	DeadRetention time.Duration
+
 	// LogLevel controls the verbosity of internal log output.
 	// nil defaults to slog.LevelError (quiet). Set explicitly to enable
 	// more verbose output, e.g. &slog.LevelInfo or &slog.LevelDebug.
@@ -230,5 +234,8 @@ func (c *Config) applyDefaults() {
 	}
 	if c.CleanupInterval == 0 {
 		c.CleanupInterval = d.CleanupInterval
+	}
+	if c.DeadRetention == 0 {
+		c.DeadRetention = 10 * c.GossipInterval
 	}
 }
