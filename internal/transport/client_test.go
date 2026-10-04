@@ -330,9 +330,30 @@ func TestClient_Send_DialFailure_WrapsErrUnsent(t *testing.T) {
 	client := NewClient("127.0.0.1:1", "", nil, nil, 1, slog.Default()) // nothing listens on port 1
 	defer client.Close()
 
+	start := time.Now()
 	_, err := client.Send(context.Background(), Frame{Type: MsgForward})
 	if !errors.Is(err, ErrUnsent) {
 		t.Errorf("got %v, want an error wrapping ErrUnsent", err)
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("a refused dial took %v: Send should return at once and leave retrying to the caller", elapsed)
+	}
+}
+
+func TestClient_Send_DeadPooledConn_RetriedAtOnce(t *testing.T) {
+	s := startTestServer(t, func(_ MsgType, payload []byte) ([]byte, error) { return payload, nil })
+	client := NewClient(s.Addr().String(), "", nil, nil, 1, slog.Default())
+	defer client.Close()
+	a, b := net.Pipe()
+	b.Close()
+	client.conns[0].Store(newConn(a, nil, slog.Default())) // dead socket, not yet noticed by a read loop
+
+	start := time.Now()
+	if _, err := client.Send(t.Context(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("retry after a dead pooled connection took %v, want it immediate", elapsed)
 	}
 }
 

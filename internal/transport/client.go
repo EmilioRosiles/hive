@@ -46,43 +46,26 @@ func NewClient(addr, localID string, handler Handler, tlsConfig *tls.Config, poo
 	return &Client{addr: addr, localID: localID, handler: handler, timeout: defaultTimeout, tlsConfig: tlsConfig, conns: make([]atomic.Pointer[conn], max(1, poolSize)), logger: logger}
 }
 
-// Send delivers frame to the peer and returns the response, retrying only while
-// the frame never left. Failures wrap ErrUnsent (not sent), ErrMuxClosed or a
-// context error (outcome unknown), or ErrRejected (peer answered with an error).
+// Send delivers frame to the peer and returns the response. A frame that never
+// left because its pooled connection had died is retried at once on another
+// connection; a failed dial is not retried, callers decide. Failures wrap
+// ErrUnsent (not sent), ErrMuxClosed or a context error (outcome unknown), or
+// ErrRejected (peer answered with an error).
 func (c *Client) Send(ctx context.Context, frame Frame) (Frame, error) {
-	for attempt := range 3 {
-		cn, err := c.pick()
+	var err error
+	for range 3 {
+		var cn *conn
+		cn, err = c.pick()
 		if err != nil {
-			if attempt < 2 && !errors.Is(err, errClientClosed) {
-				if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
-					return Frame{}, serr
-				}
-				continue
-			}
 			return Frame{}, fmt.Errorf("transport: connect to %s: %w: %w", c.addr, ErrUnsent, err)
 		}
-		resp, err := cn.send(ctx, frame)
-		if err == nil {
-			return resp, nil
+		var resp Frame
+		resp, err = cn.send(ctx, frame)
+		if !errors.Is(err, ErrUnsent) {
+			return resp, err
 		}
-		if errors.Is(err, ErrUnsent) && attempt < 2 {
-			if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
-				return Frame{}, serr
-			}
-			continue
-		}
-		return Frame{}, err
 	}
-	return Frame{}, fmt.Errorf("transport: send to %s failed", c.addr)
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	select {
-	case <-time.After(d):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return Frame{}, err
 }
 
 // pick returns the least busy live connection. When every connection is busy
