@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // These tests exercise the full Client -> mux -> Server stack (as opposed to
@@ -316,10 +317,49 @@ func TestServer_AdoptsHelloConn_PeerSendsBackOverIt(t *testing.T) {
 	if resp, err := clientA.Send(t.Context(), Frame{Type: MsgForward}); err != nil || string(resp.Payload) != "from B" {
 		t.Fatalf("A -> B: got %q, %v", resp.Payload, err)
 	}
+	waitAdopted(t, clientB)
 
 	resp, err := clientB.Send(t.Context(), Frame{Type: MsgForward})
 	if err != nil || string(resp.Payload) != "from A" {
 		t.Fatalf("B -> A over the adopted connection: got %q, %v", resp.Payload, err)
+	}
+}
+
+// waitAdopted waits until c holds a connection in its first slot.
+func waitAdopted(t *testing.T, c *Client) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for c.conns[0].Load() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("connection never adopted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestServer_HelloWhileClientDials_StillServes checks that adopting a
+// connection never blocks its read loop, even while the peer's Client is
+// mid-dial and holds its lock.
+func TestServer_HelloWhileClientDials_StillServes(t *testing.T) {
+	clientB := NewClient("127.0.0.1:1", "B", nil, nil, 1, slog.Default())
+	defer clientB.Close()
+	srv, err := NewServer("127.0.0.1:0", func(MsgType, []byte) ([]byte, error) { return []byte("from B"), nil },
+		func(nodeID string) (*Client, bool) { return clientB, nodeID == "A" }, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() { srv.Close() })
+
+	clientB.mu.Lock()
+	defer clientB.mu.Unlock()
+
+	clientA := NewClient(srv.Addr().String(), "A", nil, nil, 1, slog.Default())
+	defer clientA.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if _, err := clientA.Send(ctx, Frame{Type: MsgForward}); err != nil {
+		t.Fatalf("A's request stalled behind adoption: %v", err)
 	}
 }
 

@@ -106,7 +106,7 @@ func (c *conn) readLoop() {
 			}
 		case frame.Type == MsgHello:
 			if c.onHello != nil {
-				c.onHello(string(frame.Payload), c)
+				go c.onHello(string(frame.Payload), c)
 			}
 		default:
 			go c.serve(frame)
