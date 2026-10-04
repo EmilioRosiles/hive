@@ -105,8 +105,8 @@ type Config struct {
 	RebalanceTimeout time.Duration
 
 	// ReplicationQueueSize is the max number of queued-but-unsent replication
-	// writes held per peer before enqueuing blocks (backpressure).
-	// Defaults to 4096.
+	// writes held per peer; further writes for that peer are dropped until it
+	// catches up. Defaults to 4096.
 	ReplicationQueueSize int
 
 	// ReplicationBatchSize is the max number of queued replication writes sent

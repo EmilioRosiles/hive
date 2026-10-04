@@ -140,67 +140,55 @@ func setReq(i int) transport.ForwardRequest {
 	return transport.ForwardRequest{Op: transport.OpValueSet, Key: "k", Args: [][]byte{{byte(i)}}}
 }
 
-// fillStuckPeer queues writes for a peer whose handler is gated, until the
-// next enqueue must block: one batch in flight, a full peer queue and a full
-// jobs channel (queue size 1). It returns a channel closed once that blocked
-// enqueue returns.
-func fillStuckPeer(t *testing.T, m *Cluster) chan struct{} {
-	t.Helper()
-	m.replicator.enqueue("peer", setReq(1))
-	waitForCond(t, time.Second, "first batch in flight", func() bool {
-		return len(m.replicator.jobs) == 0
-	})
-	m.replicator.enqueue("peer", setReq(2))
-	m.replicator.enqueue("peer", setReq(3))
+func TestReplicator_FullQueue_DropsWithoutBlocking(t *testing.T) {
+	fp := newFakePeer(t)
+	m := clusterWithPeer(t, "self", fp.addr, 2, 1)
+	setStatus(m, "peer", NodeSuspect)
 
 	done := make(chan struct{})
 	go func() {
-		m.replicator.enqueue("peer", setReq(4))
+		for i := range 5 {
+			m.replicator.enqueue("peer", setReq(i))
+		}
 		close(done)
 	}()
 	select {
 	case <-done:
-		t.Fatal("enqueue should block while the peer queue is full and the peer is stuck")
-	case <-time.After(150 * time.Millisecond):
+	case <-time.After(time.Second):
+		t.Fatal("enqueue blocked on a full queue")
 	}
-	return done
-}
 
-func TestReplicator_Backpressure_BlocksWhenQueueFull(t *testing.T) {
-	fp := newFakePeer(t)
-	fp.gate = make(chan struct{})
-	m := clusterWithPeer(t, "self", fp.addr, 1, 1)
-	done := fillStuckPeer(t, m)
-
-	close(fp.gate)
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("blocked enqueue should unblock once the queue drains")
-	}
-	waitForCond(t, 2*time.Second, "all writes applied", func() bool {
+	m.markAlive("peer")
+	waitForCond(t, 2*time.Second, "held writes flushed", func() bool {
+		return len(fp.received()) == 3
+	})
+	m.replicator.enqueue("peer", setReq(9))
+	waitForCond(t, 2*time.Second, "write after the flush applied", func() bool {
 		return len(fp.received()) == 4
 	})
+	var got []byte
+	for _, req := range fp.received() {
+		got = append(got, req.Args[0][0])
+	}
+	if string(got) != string([]byte{0, 1, 2, 9}) {
+		t.Errorf("applied %v, want [0 1 2 9]: one batch in flight plus a full queue of 2, the rest dropped", got)
+	}
 }
 
-func TestReplicator_DeadPeer_DropsQueueAndReleasesBlocked(t *testing.T) {
+func TestReplicator_FailedSend_SuspectsThenDead(t *testing.T) {
 	fp := newFakePeer(t)
 	fp.gate = make(chan struct{})
 	t.Cleanup(func() { close(fp.gate) })
-	m := clusterWithPeer(t, "self", fp.addr, 1, 1)
-	m.cfg.RoutingTimeout = 500 * time.Millisecond
+	m := clusterWithPeer(t, "self", fp.addr, 64, 1)
+	m.cfg.RoutingTimeout = 200 * time.Millisecond
 	m.cfg.ProbeTimeout = 50 * time.Millisecond
-	done := fillStuckPeer(t, m)
 
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("blocked enqueue should be released once the peer is marked dead")
-	}
-	if status, _ := m.peerStatus("peer"); status != NodeDead {
-		t.Errorf("status: got %v, want NodeDead", status)
-	}
+	m.replicator.enqueue("peer", setReq(1))
+
+	waitForCond(t, 3*time.Second, "peer marked dead by the probe", func() bool {
+		status, _ := m.peerStatus("peer")
+		return status == NodeDead
+	})
 }
 
 func TestReplicator_RejectedBatch_NotSuspected(t *testing.T) {

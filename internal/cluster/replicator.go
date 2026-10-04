@@ -55,7 +55,8 @@ func newReplicator(mgr *Cluster) *replicator {
 	return r
 }
 
-// enqueue blocks until req is queued for nodeID or the replicator is stopped.
+// enqueue queues req for nodeID. It waits only while the worker catches up,
+// or until the replicator is stopped.
 func (r *replicator) enqueue(nodeID string, req transport.ForwardRequest) {
 	if !r.enabled {
 		return
@@ -67,43 +68,37 @@ func (r *replicator) enqueue(nodeID string, req transport.ForwardRequest) {
 }
 
 // run appends jobs to per-peer queues and keeps one sender per busy peer.
-// It stops taking jobs while a peer's queue is full, and drops a peer's queue
-// once the peer is Dead.
+// Writes for a peer whose queue is full are dropped, and a peer's queue is
+// dropped once the peer is Dead.
 func (r *replicator) run() {
 	queues := make(map[string][]transport.ForwardRequest)
 	inflight := make(map[string]bool)
-	full := ""
 	for {
-		jobs := r.jobs
-		if full != "" {
-			jobs = nil
-		}
-		var nodeID string
 		select {
-		case job := <-jobs:
-			nodeID = job.nodeID
-			queues[nodeID] = append(queues[nodeID], job.req)
-			if !inflight[nodeID] {
-				inflight[nodeID] = true
-				go r.send(nodeID, r.take(queues, nodeID))
+		case job := <-r.jobs:
+			q := queues[job.nodeID]
+			if len(q) >= r.mgr.cfg.ReplicationQueueSize {
+				continue
+			}
+			queues[job.nodeID] = append(q, job.req)
+			if len(q)+1 == r.mgr.cfg.ReplicationQueueSize {
+				r.mgr.logger.Warn("replicator: queue full, dropping writes", "node", job.nodeID)
+			}
+			if !inflight[job.nodeID] {
+				inflight[job.nodeID] = true
+				go r.send(job.nodeID, r.take(queues, job.nodeID))
 			}
 		case d := <-r.done:
-			nodeID = d.nodeID
 			if d.dead {
-				delete(queues, nodeID)
+				delete(queues, d.nodeID)
 			}
-			batch := r.take(queues, nodeID)
+			batch := r.take(queues, d.nodeID)
 			if len(batch.Requests) == 0 {
-				delete(inflight, nodeID)
+				delete(inflight, d.nodeID)
 			}
 			d.next <- batch
 		case <-r.stopCh:
 			return
-		}
-		if len(queues[nodeID]) >= r.mgr.cfg.ReplicationQueueSize {
-			full = nodeID
-		} else if full == nodeID {
-			full = ""
 		}
 	}
 }
