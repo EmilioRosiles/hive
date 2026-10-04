@@ -128,7 +128,7 @@ func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op,
 
 // fanOutReplicas delivers req to each node in nodes. A node that is this node
 // executes the op synchronously (no network I/O involved); a remote node's
-// write is queued on its replicator, which applies queued writes to that
+// write is queued on the replicator, which applies queued writes to each
 // peer in order. nodes is typically nodes[1:] from the ring so the primary
 // (nodes[0]) is never duplicated here.
 func (m *Cluster) fanOutReplicas(def opDef, req transport.ForwardRequest, nodes []string) {
@@ -137,9 +137,7 @@ func (m *Cluster) fanOutReplicas(def opDef, req transport.ForwardRequest, nodes 
 			def.Exec(m, req.Key, req.Args, req.LockToken)
 			continue
 		}
-		if rep, ok := m.getReplicator(nodeID); ok {
-			rep.enqueue(req)
-		}
+		m.replicator.enqueue(nodeID, req)
 	}
 }
 

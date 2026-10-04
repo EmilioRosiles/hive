@@ -7,84 +7,129 @@ import (
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
 
-// replicator serializes replication writes to one peer through a single
-// worker goroutine, so writes to that peer are always applied in the order
-// they were dispatched, with one goroutine per peer instead of one per write.
+// replJob is one replication write bound for nodeID.
+type replJob struct {
+	nodeID string
+	req    transport.ForwardRequest
+}
+
+// replDone reports the outcome of one batch sent to nodeID; the sender then
+// waits on next for its following batch, or nil to exit.
+type replDone struct {
+	nodeID string
+	err    error
+	next   chan []transport.ForwardRequest
+}
+
+// replicator applies replication writes to every peer through one worker,
+// keeping per-peer FIFO order with at most one batch in flight per peer.
 type replicator struct {
 	mgr     *Cluster
 	once    sync.Once
-	nodeID  string
-	jobs    chan transport.ForwardRequest
+	jobs    chan replJob
+	done    chan replDone
 	stopCh  chan struct{}
 	enabled bool
 }
 
-func newReplicator(nodeID string, mgr *Cluster) *replicator {
+// newReplicator builds the cluster's replicator, a no-op when ReplicationFactor is 1.
+func newReplicator(mgr *Cluster) *replicator {
 	r := &replicator{
 		mgr:     mgr,
-		nodeID:  nodeID,
 		stopCh:  make(chan struct{}),
 		enabled: mgr.cfg.ReplicationFactor > 1,
 	}
 	if r.enabled {
-		r.jobs = make(chan transport.ForwardRequest, mgr.cfg.ReplicationQueueSize)
+		r.jobs = make(chan replJob, mgr.cfg.ReplicationQueueSize)
+		r.done = make(chan replDone)
 		go r.run()
 	}
 	return r
 }
 
-// enqueue blocks until req is queued or the peer is confirmed dead, giving
-// bounded backpressure: a full queue blocks the caller only as long as it
-// takes the worker to drain it, or to detect the peer is unreachable.
-// A no-op replicator (see newReplicator) has no jobs channel and discards req.
-func (r *replicator) enqueue(req transport.ForwardRequest) {
+// enqueue blocks until req is queued for nodeID or the replicator is stopped.
+func (r *replicator) enqueue(nodeID string, req transport.ForwardRequest) {
 	if !r.enabled {
 		return
 	}
 	select {
-	case r.jobs <- req:
+	case r.jobs <- replJob{nodeID: nodeID, req: req}:
 	case <-r.stopCh:
 	}
 }
 
-// run applies queued writes to the peer in order, opportunistically batching
-// whatever else is already queued into each send, until the peer fails or
-// this replicator is stopped.
+// run appends jobs to per-peer queues and keeps one sender per busy peer.
+// It stops taking jobs while a peer's queue is full, and drops a peer's queue
+// and marks it dead when a send fails.
 func (r *replicator) run() {
+	queues := make(map[string][]transport.ForwardRequest)
+	inflight := make(map[string]bool)
+	full := ""
 	for {
-		var first transport.ForwardRequest
+		jobs := r.jobs
+		if full != "" {
+			jobs = nil
+		}
+		var nodeID string
 		select {
-		case first = <-r.jobs:
+		case job := <-jobs:
+			nodeID = job.nodeID
+			queues[nodeID] = append(queues[nodeID], job.req)
+			if !inflight[nodeID] {
+				inflight[nodeID] = true
+				go r.send(nodeID, r.take(queues, nodeID))
+			}
+		case d := <-r.done:
+			nodeID = d.nodeID
+			if d.err != nil {
+				r.mgr.markDead(nodeID)
+				delete(queues, nodeID)
+			}
+			batch := r.take(queues, nodeID)
+			if batch == nil {
+				delete(inflight, nodeID)
+			}
+			d.next <- batch
 		case <-r.stopCh:
 			return
 		}
-		batch := r.drain(first)
-
-		ctx, cancel := context.WithTimeout(context.Background(), r.mgr.cfg.RoutingTimeout)
-		err := r.mgr.sendForwardBatch(ctx, r.nodeID, batch)
-		cancel()
-		if err != nil {
-			r.mgr.markDead(r.nodeID)
-			return
+		if len(queues[nodeID]) >= r.mgr.cfg.ReplicationQueueSize {
+			full = nodeID
+		} else if full == nodeID {
+			full = ""
 		}
 	}
 }
 
-// drain collects first plus whatever else is immediately available on jobs,
-// up to ReplicationBatchSize, without blocking. It grows batch on demand
-// rather than preallocating ReplicationBatchSize capacity up front, since
-// most drains catch only a handful of jobs, not a full batch's worth.
-func (r *replicator) drain(first transport.ForwardRequest) []transport.ForwardRequest {
-	batch := []transport.ForwardRequest{first}
-	for len(batch) < r.mgr.cfg.ReplicationBatchSize {
-		select {
-		case req := <-r.jobs:
-			batch = append(batch, req)
-		default:
-			return batch
-		}
+// take removes and returns the next batch from nodeID's queue, or nil if it is empty.
+func (r *replicator) take(queues map[string][]transport.ForwardRequest, nodeID string) []transport.ForwardRequest {
+	q := queues[nodeID]
+	if len(q) == 0 {
+		return nil
 	}
-	return batch
+	n := min(len(q), r.mgr.cfg.ReplicationBatchSize)
+	if n == len(q) {
+		delete(queues, nodeID)
+	} else {
+		queues[nodeID] = q[n:]
+	}
+	return q[:n]
+}
+
+// send delivers batches to nodeID until run has none left for it.
+func (r *replicator) send(nodeID string, batch []transport.ForwardRequest) {
+	next := make(chan []transport.ForwardRequest, 1)
+	for batch != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), r.mgr.cfg.RoutingTimeout)
+		err := r.mgr.sendForwardBatch(ctx, nodeID, batch)
+		cancel()
+		select {
+		case r.done <- replDone{nodeID: nodeID, err: err, next: next}:
+		case <-r.stopCh:
+			return
+		}
+		batch = <-next
+	}
 }
 
 func (r *replicator) stop() {

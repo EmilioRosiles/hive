@@ -75,7 +75,7 @@ type Cluster struct {
 	store       *store.DataStore
 	peers       map[string]*PeerInfo
 	clients     map[string]*transport.Client
-	replicators map[string]*replicator
+	replicator  *replicator
 	rebalancer  *rebalancer
 	server      *transport.Server
 	stopCh      chan struct{}
@@ -92,18 +92,18 @@ func NewCluster(cfg Config) (*Cluster, error) {
 	vNodeCount := computeVNodes(cfg.MemLimit)
 
 	m := &Cluster{
-		cfg:         cfg,
-		ring:        r,
-		store:       ds,
-		peers:       make(map[string]*PeerInfo),
-		clients:     make(map[string]*transport.Client),
-		replicators: make(map[string]*replicator),
-		stopCh:      make(chan struct{}),
-		logger:      cfg.Logger,
+		cfg:     cfg,
+		ring:    r,
+		store:   ds,
+		peers:   make(map[string]*PeerInfo),
+		clients: make(map[string]*transport.Client),
+		stopCh:  make(chan struct{}),
+		logger:  cfg.Logger,
 	}
 	m.incarnation.Store(uint64(time.Now().UnixNano()))
 	m.ring.Add(cfg.NodeID, vNodeCount)
 	m.rebalancer = newRebalancer(cfg.RebalanceDebounce, m)
+	m.replicator = newReplicator(m)
 	go m.startJanitor()
 
 	if cfg.Clustered {
@@ -137,9 +137,7 @@ func (m *Cluster) Shutdown() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		for _, rep := range m.replicators {
-			rep.stop()
-		}
+		m.replicator.stop()
 
 		for _, c := range m.clients {
 			c.Close()
@@ -189,7 +187,6 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 			p.Incarnation = ps.Incarnation
 			m.ring.Add(ps.NodeID, vNodeCount)
 			m.clients[ps.NodeID] = m.newClient(ps.Addr)
-			m.replicators[ps.NodeID] = newReplicator(ps.NodeID, m)
 			go m.rebalancer.schedule()
 		}
 		return nil
@@ -206,7 +203,6 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	}
 	m.ring.Add(ps.NodeID, vNodeCount)
 	m.clients[ps.NodeID] = m.newClient(ps.Addr)
-	m.replicators[ps.NodeID] = newReplicator(ps.NodeID, m)
 	go m.rebalancer.schedule()
 
 	m.logger.Info("cluster: added peer", "nodeID", ps.NodeID, "addr", ps.Addr)
@@ -214,7 +210,7 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 }
 
 // markSuspect marks an Alive peer Suspect and probes it in the background, leaving
-// its ring position, client and replicator in place. Only the probe ends the
+// its ring position and client in place. Only the probe ends the
 // suspicion, by marking the peer Alive or Dead.
 func (m *Cluster) markSuspect(nodeID string) {
 	m.mu.Lock()
@@ -255,10 +251,6 @@ func (m *Cluster) markDead(nodeID string) {
 	if c, ok := m.clients[nodeID]; ok {
 		go c.Close()
 		delete(m.clients, nodeID)
-	}
-	if rep, ok := m.replicators[nodeID]; ok {
-		rep.stop()
-		delete(m.replicators, nodeID)
 	}
 	go m.rebalancer.schedule()
 	m.logger.Warn("cluster: peer marked dead", "node", nodeID)
@@ -426,14 +418,6 @@ func (m *Cluster) getClient(nodeID string) (*transport.Client, bool) {
 	defer m.mu.RUnlock()
 	c, ok := m.clients[nodeID]
 	return c, ok
-}
-
-// getReplicator returns the replication queue worker for a peer node ID.
-func (m *Cluster) getReplicator(nodeID string) (*replicator, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	r, ok := m.replicators[nodeID]
-	return r, ok
 }
 
 // randomAlivePeers returns up to n randomly selected alive peers.

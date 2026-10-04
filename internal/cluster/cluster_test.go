@@ -42,16 +42,16 @@ func newTestClusterRF(nodeID string, rf int) *Cluster {
 			ReplicationBatchSize: 16,
 			MemLimit:             256 << 20, // nonzero so this fixture's rebalancer isn't a no-op
 		},
-		ring:        r,
-		store:       store.NewDataStore(math.MaxInt64), // capacity is enforced literally; this fixture doesn't want a cap
-		peers:       make(map[string]*PeerInfo),
-		clients:     make(map[string]*transport.Client),
-		replicators: make(map[string]*replicator),
-		stopCh:      make(chan struct{}),
-		logger:      slog.Default(),
+		ring:    r,
+		store:   store.NewDataStore(math.MaxInt64), // capacity is enforced literally; this fixture doesn't want a cap
+		peers:   make(map[string]*PeerInfo),
+		clients: make(map[string]*transport.Client),
+		stopCh:  make(chan struct{}),
+		logger:  slog.Default(),
 	}
 	m.incarnation.Store(uint64(time.Now().UnixNano()))
 	m.rebalancer = newRebalancer(0, m)
+	m.replicator = newReplicator(m)
 	return m
 }
 
@@ -94,27 +94,13 @@ func TestAddPeer_New(t *testing.T) {
 	if _, ok := m.getClient("peer1"); !ok {
 		t.Error("client should be registered after addPeer")
 	}
-	if _, ok := m.getReplicator("peer1"); !ok {
-		t.Error("replicator should be registered after addPeer")
-	}
 }
 
-// TestAddPeer_ReplicationFactorOne_NoopReplicator verifies RF=1 gets a
-// no-op replicator (present in the map, but no jobs channel).
-func TestAddPeer_ReplicationFactorOne_NoopReplicator(t *testing.T) {
-	m := newTestCluster("self") // RF=1
-
-	if err := m.addPeer(ps("peer1", "127.0.0.1:1001", NodeAlive, 100)); err != nil {
-		t.Fatalf("addPeer: %v", err)
-	}
-	if _, ok := m.getClient("peer1"); !ok {
-		t.Error("client should still be registered — forwarding always needs it")
-	}
-	rep, ok := m.getReplicator("peer1")
-	if !ok {
-		t.Fatal("replicator entry should still exist (as a no-op) after addPeer")
-	}
-	if rep.jobs != nil {
+// TestReplicator_ReplicationFactorOne_Noop verifies RF=1 gets a no-op
+// replicator with no jobs channel.
+func TestReplicator_ReplicationFactorOne_Noop(t *testing.T) {
+	m := newTestCluster("self")
+	if m.replicator.jobs != nil {
 		t.Error("replicator should be a no-op (no jobs channel) when ReplicationFactor is 1")
 	}
 }
@@ -149,9 +135,6 @@ func TestAddPeer_RevivesDead(t *testing.T) {
 	}
 	if _, ok := m.getClient("peer1"); !ok {
 		t.Error("client should be re-registered after revival")
-	}
-	if _, ok := m.getReplicator("peer1"); !ok {
-		t.Error("replicator should be re-registered after revival")
 	}
 }
 
@@ -474,9 +457,6 @@ func TestMarkDead_AlivePeer(t *testing.T) {
 	}
 	if _, ok := m.getClient("peer1"); ok {
 		t.Error("client should be removed after markDead")
-	}
-	if _, ok := m.getReplicator("peer1"); ok {
-		t.Error("replicator should be removed after markDead")
 	}
 }
 

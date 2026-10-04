@@ -74,16 +74,18 @@ func waitForCond(t *testing.T, timeout time.Duration, msg string, cond func() bo
 	t.Fatalf("timed out waiting for: %s", msg)
 }
 
-// clusterWithPeer builds a two-node test Cluster ("self") with a live
-// replicator pointed at addr (RF=2, so it's active — see
-// TestAddPeer_ReplicationFactorOne_NoopReplicator), using small queue/batch
-// sizes so backpressure and batching behavior are easy to exercise.
+// clusterWithPeer builds a two-node test Cluster ("self") with an active
+// replicator (RF=2) and a peer at addr, using small queue/batch sizes so
+// backpressure and batching behavior are easy to exercise.
 func clusterWithPeer(t *testing.T, nodeID, addr string, queueSize, batchSize int) *Cluster {
 	t.Helper()
 	m := newTestClusterRF(nodeID, 2)
 	m.cfg.ReplicationQueueSize = queueSize
 	m.cfg.ReplicationBatchSize = batchSize
 	m.cfg.RoutingTimeout = 2 * time.Second
+	m.replicator.stop()
+	m.replicator = newReplicator(m)
+	t.Cleanup(m.replicator.stop)
 	if err := m.addPeer(psRF("peer", addr, NodeAlive, 1, 2)); err != nil {
 		t.Fatalf("addPeer: %v", err)
 	}
@@ -93,14 +95,10 @@ func clusterWithPeer(t *testing.T, nodeID, addr string, queueSize, batchSize int
 func TestReplicator_AppliesWritesInOrder(t *testing.T) {
 	fp := newFakePeer(t)
 	m := clusterWithPeer(t, "self", fp.addr, 512, 8)
-	rep, ok := m.getReplicator("peer")
-	if !ok {
-		t.Fatal("replicator should exist after addPeer")
-	}
 
 	const n = 200
 	for i := range n {
-		rep.enqueue(transport.ForwardRequest{Op: transport.OpValueSet, Key: "k", Args: [][]byte{[]byte{byte(i)}}})
+		m.replicator.enqueue("peer", transport.ForwardRequest{Op: transport.OpValueSet, Key: "k", Args: [][]byte{[]byte{byte(i)}}})
 	}
 
 	waitForCond(t, 2*time.Second, "all writes applied", func() bool {
@@ -115,85 +113,94 @@ func TestReplicator_AppliesWritesInOrder(t *testing.T) {
 	}
 }
 
+// fillStuckPeer queues writes for a peer whose handler is gated, until the
+// next enqueue must block: one batch in flight, a full peer queue and a full
+// jobs channel (queue size 1). It returns a channel closed once that blocked
+// enqueue returns.
+func fillStuckPeer(t *testing.T, m *Cluster) chan struct{} {
+	t.Helper()
+	req := func(i int) transport.ForwardRequest {
+		return transport.ForwardRequest{Op: transport.OpValueSet, Key: "k", Args: [][]byte{[]byte{byte(i)}}}
+	}
+	m.replicator.enqueue("peer", req(1))
+	waitForCond(t, time.Second, "first batch in flight", func() bool {
+		return len(m.replicator.jobs) == 0
+	})
+	m.replicator.enqueue("peer", req(2))
+	m.replicator.enqueue("peer", req(3))
+
+	done := make(chan struct{})
+	go func() {
+		m.replicator.enqueue("peer", req(4))
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("enqueue should block while the peer queue is full and the peer is stuck")
+	case <-time.After(150 * time.Millisecond):
+	}
+	return done
+}
+
 func TestReplicator_Backpressure_BlocksWhenQueueFull(t *testing.T) {
 	fp := newFakePeer(t)
 	fp.gate = make(chan struct{})
 	m := clusterWithPeer(t, "self", fp.addr, 1, 1)
-	rep, _ := m.getReplicator("peer")
+	done := fillStuckPeer(t, m)
 
-	req := func(i int) transport.ForwardRequest {
-		return transport.ForwardRequest{Op: transport.OpValueSet, Key: "k", Args: [][]byte{[]byte{byte(i)}}}
-	}
-
-	// job1 is picked up by the worker immediately and blocks on fp.gate.
-	rep.enqueue(req(1))
-	// job2 fills the (size-1) queue.
-	rep.enqueue(req(2))
-
-	// job3 must block: the worker is stuck sending job1, and job2 already
-	// occupies the only queue slot.
-	done := make(chan struct{})
-	go func() {
-		rep.enqueue(req(3))
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Fatal("enqueue should block while the queue is full and the peer is stuck")
-	case <-time.After(150 * time.Millisecond):
-	}
-
-	close(fp.gate) // release job1's send; worker moves on to job2, freeing a slot for job3
+	close(fp.gate)
 
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("blocked enqueue should unblock once the queue drains")
 	}
+	waitForCond(t, 2*time.Second, "all writes applied", func() bool {
+		return len(fp.received()) == 4
+	})
 }
 
-func TestReplicator_SendFailure_StopsWorkerAndReleasesBlocked(t *testing.T) {
+func TestReplicator_SendFailure_MarksDeadAndReleasesBlocked(t *testing.T) {
 	fp := newFakePeer(t)
 	fp.gate = make(chan struct{})
 	fp.fail = true
 	m := clusterWithPeer(t, "self", fp.addr, 1, 1)
-	rep, _ := m.getReplicator("peer")
+	done := fillStuckPeer(t, m)
 
-	req := func(i int) transport.ForwardRequest {
-		return transport.ForwardRequest{Op: transport.OpValueSet, Key: "k", Args: [][]byte{[]byte{byte(i)}}}
-	}
-
-	rep.enqueue(req(1)) // picked up immediately, blocks on fp.gate before failing
-	rep.enqueue(req(2)) // fills the queue
-
-	done := make(chan struct{})
-	go func() {
-		rep.enqueue(req(3)) // must block until the peer is marked dead
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Fatal("enqueue should block while the worker is stuck")
-	case <-time.After(150 * time.Millisecond):
-	}
-
-	close(fp.gate) // let job1's send fail
+	close(fp.gate)
 
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("blocked enqueue should be released once the peer is marked dead")
 	}
-
-	waitForCond(t, 2*time.Second, "peer marked dead", func() bool {
-		_, ok := m.getReplicator("peer")
-		return !ok
-	})
+	if status, _ := m.peerStatus("peer"); status != NodeDead {
+		t.Errorf("status: got %v, want NodeDead", status)
+	}
 	if _, ok := m.getClient("peer"); ok {
 		t.Error("client should be removed once the peer is marked dead")
 	}
+}
+
+func TestReplicator_StuckPeerDoesNotStallOthers(t *testing.T) {
+	stuck := newFakePeer(t)
+	stuck.gate = make(chan struct{})
+	t.Cleanup(func() { close(stuck.gate) })
+	fp := newFakePeer(t)
+	m := clusterWithPeer(t, "self", stuck.addr, 64, 4)
+	if err := m.addPeer(psRF("other", fp.addr, NodeAlive, 1, 2)); err != nil {
+		t.Fatalf("addPeer: %v", err)
+	}
+
+	req := transport.ForwardRequest{Op: transport.OpValueSet, Key: "k", Args: [][]byte{[]byte("v")}}
+	m.replicator.enqueue("peer", req)
+	for range 10 {
+		m.replicator.enqueue("other", req)
+	}
+
+	waitForCond(t, time.Second, "other peer receives writes while peer is stuck", func() bool {
+		return len(fp.received()) == 10
+	})
 }
 
 func TestFanOutReplicas_LocalTarget_ExecutesSynchronously(t *testing.T) {
