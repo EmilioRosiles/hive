@@ -541,28 +541,27 @@ func TestEvictDeadPeers_EmptyMap_NoOp(t *testing.T) {
 	m.evictDeadPeers() // should not panic
 }
 
-// -- randomAlivePeers --
+// -- randomPeers --
 
-func TestRandomAlivePeers_OnlyReturnsAlive(t *testing.T) {
+func TestRandomPeers_SkipsDeadAndExcluded(t *testing.T) {
 	m := newTestCluster("self")
 	m.addPeer(ps("alive1", "127.0.0.1:1001", NodeAlive, 100))
-	m.addPeer(ps("alive2", "127.0.0.1:1002", NodeAlive, 100))
-	m.addPeer(ps("dead1", "127.0.0.1:1003", NodeAlive, 100))
+	m.addPeer(ps("target", "127.0.0.1:1002", NodeAlive, 100))
+	m.addPeer(ps("suspect1", "127.0.0.1:1003", NodeAlive, 100))
+	m.addPeer(ps("dead1", "127.0.0.1:1004", NodeAlive, 100))
+	setStatus(m, "suspect1", NodeSuspect)
 	m.markDead("dead1")
 
-	peers := m.randomAlivePeers(10)
-
-	if len(peers) != 2 {
-		t.Errorf("got %d alive peers, want 2", len(peers))
+	got := map[string]bool{}
+	for _, p := range m.randomPeers(10, "target") {
+		got[p.NodeID] = true
 	}
-	for _, p := range peers {
-		if p.Status != NodeAlive {
-			t.Errorf("randomAlivePeers returned dead peer %s", p.NodeID)
-		}
+	if len(got) != 2 || !got["alive1"] || !got["suspect1"] {
+		t.Errorf("got %v, want alive1 and suspect1", got)
 	}
 }
 
-func TestRandomAlivePeers_CountCapped(t *testing.T) {
+func TestRandomPeers_CountCapped(t *testing.T) {
 	m := newTestCluster("self")
 	for i := range 5 {
 		m.addPeer(ps(
@@ -572,14 +571,14 @@ func TestRandomAlivePeers_CountCapped(t *testing.T) {
 		))
 	}
 
-	if got := len(m.randomAlivePeers(2)); got != 2 {
+	if got := len(m.randomPeers(2, "")); got != 2 {
 		t.Errorf("got %d peers, want 2", got)
 	}
 }
 
-func TestRandomAlivePeers_NoPeers(t *testing.T) {
+func TestRandomPeers_NoPeers(t *testing.T) {
 	m := newTestCluster("self")
-	if peers := m.randomAlivePeers(3); len(peers) != 0 {
+	if peers := m.randomPeers(3, ""); len(peers) != 0 {
 		t.Errorf("expected empty slice, got %d peers", len(peers))
 	}
 }

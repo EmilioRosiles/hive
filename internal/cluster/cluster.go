@@ -31,6 +31,7 @@ type Config struct {
 	NodeID               string
 	BindAddr             string
 	BindPort             int
+	AdvertiseAddr        string
 	Seeds                []string
 	RoutingTimeout       time.Duration
 	RoutingRetryInterval time.Duration
@@ -283,7 +284,7 @@ func (m *Cluster) probe(nodeID string) {
 			m.markAlive(nodeID)
 			return
 		}
-		helpers := m.randomAlivePeers(m.cfg.ProbeHelpers)
+		helpers := m.randomPeers(m.cfg.ProbeHelpers, nodeID)
 		if len(helpers) == 0 {
 			m.markDead(nodeID)
 			return
@@ -438,14 +439,15 @@ func (m *Cluster) getClient(nodeID string) (*transport.Client, bool) {
 	return c, ok
 }
 
-// randomAlivePeers returns up to n randomly selected alive peers.
-func (m *Cluster) randomAlivePeers(n int) []*PeerInfo {
+// randomPeers returns up to n random peers that aren't Dead, other than exclude.
+// A Suspect peer is still serving, so it counts.
+func (m *Cluster) randomPeers(n int, exclude string) []*PeerInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	alive := make([]*PeerInfo, 0, len(m.peers))
 	for _, p := range m.peers {
-		if p.Status == NodeAlive {
+		if p.Status != NodeDead && p.NodeID != exclude {
 			alive = append(alive, p)
 		}
 	}

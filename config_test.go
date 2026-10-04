@@ -102,3 +102,16 @@ func TestConfig_RoutingRetryIntervalDefault(t *testing.T) {
 		t.Errorf("explicit value overwritten: got %v", c.RoutingRetryInterval)
 	}
 }
+
+func TestConfig_AdvertiseAddrDefault(t *testing.T) {
+	c := Config{BindAddr: "10.0.0.5", BindPort: 9000}
+	c.applyDefaults()
+	if c.AdvertiseAddr != "10.0.0.5:9000" {
+		t.Errorf("got %q, want BindAddr:BindPort", c.AdvertiseAddr)
+	}
+	c = Config{AdvertiseAddr: "node.example:7946"}
+	c.applyDefaults()
+	if c.AdvertiseAddr != "node.example:7946" {
+		t.Errorf("explicit value overwritten: got %q", c.AdvertiseAddr)
+	}
+}

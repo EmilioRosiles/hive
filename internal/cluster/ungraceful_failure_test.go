@@ -22,6 +22,16 @@ func newClusteredTestNode(t *testing.T, seeds []string, rf int) *Cluster {
 // newClusteredTestNodeWithPool mirrors newClusteredTestNode with an explicit ConnPoolSize.
 func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int) *Cluster {
 	t.Helper()
+	m, err := NewCluster(clusteredTestConfig(t, seeds, rf, poolSize))
+	if err != nil {
+		t.Fatalf("NewCluster: %v", err)
+	}
+	return m
+}
+
+// clusteredTestConfig returns a fast-timing clustered config on a free loopback port.
+func clusteredTestConfig(t *testing.T, seeds []string, rf, poolSize int) Config {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
@@ -29,10 +39,11 @@ func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	m, err := NewCluster(Config{
+	return Config{
 		NodeID:               fmt.Sprintf("node-%d", port),
 		BindAddr:             "127.0.0.1",
 		BindPort:             port,
+		AdvertiseAddr:        fmt.Sprintf("127.0.0.1:%d", port),
 		Seeds:                seeds,
 		ReplicationFactor:    rf,
 		MemLimit:             256 << 20, // realistic capacity/vnode count; 0 now means "owns nothing"
@@ -54,15 +65,11 @@ func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int
 		DeadRetention:        time.Second,
 		Clustered:            true,
 		Logger:               slog.Default(),
-	})
-	if err != nil {
-		t.Fatalf("NewCluster: %v", err)
 	}
-	return m
 }
 
 func clusteredAddr(m *Cluster) string {
-	return fmt.Sprintf("%s:%d", m.cfg.BindAddr, m.cfg.BindPort)
+	return m.cfg.AdvertiseAddr
 }
 
 // killUngracefully simulates a hard process crash: it stops m's background

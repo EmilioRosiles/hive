@@ -252,6 +252,7 @@ func moveKeysToPeer(t *testing.T, m *Cluster, addr string) []string {
 func TestRebalance_FailedSend_KeepsKeysAndRetries(t *testing.T) {
 	m := newTestCluster("self")
 	moved := moveKeysToPeer(t, m, "127.0.0.1:1") // nothing listens on port 1
+	setStatus(m, "peer1", NodeSuspect)           // no probe, so peer1 stays in the ring
 
 	m.rebalancer.run()
 

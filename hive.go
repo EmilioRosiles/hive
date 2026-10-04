@@ -66,6 +66,7 @@ func NewNode(cfg Config) (*Node, error) {
 		NodeID:               cfg.NodeID,
 		BindAddr:             cfg.BindAddr,
 		BindPort:             cfg.BindPort,
+		AdvertiseAddr:        cfg.AdvertiseAddr,
 		Seeds:                cfg.Seeds,
 		ReplicationFactor:    cfg.ReplicationFactor,
 		RoutingTimeout:       cfg.RoutingTimeout,
@@ -119,9 +120,9 @@ func (n *Node) ID() string {
 	return n.cfg.NodeID
 }
 
-// Addr returns the address this node listens on for peer communication.
+// Addr returns the address peers use to reach this node.
 func (n *Node) Addr() string {
-	return fmt.Sprintf("%s:%d", n.cfg.BindAddr, n.cfg.BindPort)
+	return n.cfg.AdvertiseAddr
 }
 
 // MemUsed returns this node's current estimated local byte usage.
@@ -178,7 +179,7 @@ func (c *Cluster) Members() []Member {
 
 	out = append(out, Member{
 		NodeID:            c.cfg.NodeID,
-		Addr:              fmt.Sprintf("%s:%d", c.cfg.BindAddr, c.cfg.BindPort),
+		Addr:              c.cfg.AdvertiseAddr,
 		Alive:             true,
 		ReplicationFactor: c.cfg.ReplicationFactor,
 		MemLimit:          *c.cfg.MemLimit,

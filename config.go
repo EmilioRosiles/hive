@@ -2,6 +2,7 @@ package hive
 
 import (
 	"crypto/tls"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -37,6 +38,11 @@ type Config struct {
 	// BindPort is the port this node listens on for peer communication.
 	// Defaults to 7946.
 	BindPort int
+
+	// AdvertiseAddr is the host:port peers use to reach this node, when it
+	// differs from BindAddr:BindPort (NAT, containers, proxies).
+	// Defaults to BindAddr:BindPort.
+	AdvertiseAddr string
 
 	// Seeds is a list of peer addresses (host:port) used to bootstrap
 	// cluster membership. At least one reachable seed is required when
@@ -193,6 +199,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.BindPort == 0 {
 		c.BindPort = d.BindPort
+	}
+	if c.AdvertiseAddr == "" {
+		c.AdvertiseAddr = fmt.Sprintf("%s:%d", c.BindAddr, c.BindPort)
 	}
 	if c.ReplicationFactor == 0 {
 		c.ReplicationFactor = d.ReplicationFactor

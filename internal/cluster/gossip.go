@@ -44,7 +44,7 @@ func (m *Cluster) startGossip() {
 		case <-time.After(Jitter(m.cfg.GossipInterval, 0.25)):
 		}
 
-		targets := m.randomAlivePeers(m.cfg.GossipFanout)
+		targets := m.randomPeers(m.cfg.GossipFanout, "")
 		m.heartbeat(targets...)
 		go m.rebalancer.schedule()
 	}
@@ -207,7 +207,7 @@ func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 	// Include self — always alive from our own perspective.
 	peers = append(peers, transport.PeerState{
 		NodeID:            m.cfg.NodeID,
-		Addr:              fmt.Sprintf("%s:%d", m.cfg.BindAddr, m.cfg.BindPort),
+		Addr:              m.cfg.AdvertiseAddr,
 		Status:            uint8(NodeAlive),
 		Incarnation:       m.incarnation.Load(),
 		ReplicationFactor: m.cfg.ReplicationFactor,
