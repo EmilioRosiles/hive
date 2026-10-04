@@ -72,25 +72,24 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 	}
 
 	nodes := m.responsibleNodes(key)
-	token := lockTokenFromContext(ctx)
+	req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: lockTokenFromContext(ctx)}
 
 	switch def.Scope {
 	case ScopeRead:
-		return m.execOrForward(ctx, def, op, key, args, &nodes, token)
+		return m.execOrForward(ctx, def, req, &nodes)
 
 	case ScopeWrite:
-		result, err := m.execOrForward(ctx, def, op, key, args, &nodes, token)
+		result, err := m.execOrForward(ctx, def, req, &nodes)
 		if err != nil {
 			return nil, err
 		}
 		if len(nodes) > 1 {
-			req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
 			m.fanOutReplicas(def, req, nodes[1:])
 		}
 		return result, nil
 
 	case ScopeLocal:
-		return def.Exec(m, key, args, token)
+		return def.Exec(m, key, args, req.LockToken)
 	}
 
 	return nil, fmt.Errorf("cluster: unhandled scope for op %d", op)
@@ -101,20 +100,19 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 // failed read, or after an unsent write, re-resolving *nodes each time so the
 // caller replicates to the current owners, and gives up with ErrUnavailable
 // once RoutingTimeout runs out.
-func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op, key string, args [][]byte, nodes *[]string, token uint32) ([][]byte, error) {
+func (m *Cluster) execOrForward(ctx context.Context, def opDef, req transport.ForwardRequest, nodes *[]string) ([][]byte, error) {
 	if n := *nodes; len(n) > 0 && n[0] == m.cfg.NodeID {
-		return def.Exec(m, key, args, token)
+		return def.Exec(m, req.Key, req.Args, req.LockToken)
 	}
 	rctx, cancel := context.WithTimeout(ctx, m.cfg.RoutingTimeout)
 	defer cancel()
-	req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
 	for {
 		n := *nodes
 		if len(n) == 0 {
 			return nil, ErrUnavailable
 		}
 		if n[0] == m.cfg.NodeID {
-			return def.Exec(m, key, args, token)
+			return def.Exec(m, req.Key, req.Args, req.LockToken)
 		}
 		if status, _ := m.peerStatus(n[0]); status != NodeSuspect {
 			resp, err := m.sendForward(rctx, n[0], req)
@@ -139,7 +137,7 @@ func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op,
 			}
 			return nil, ErrUnavailable
 		}
-		*nodes = m.responsibleNodes(key)
+		*nodes = m.responsibleNodes(req.Key)
 	}
 }
 
