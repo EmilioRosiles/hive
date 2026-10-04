@@ -33,6 +33,15 @@ func (r *binReader) uint32() (uint32, error) {
 	return v, nil
 }
 
+func (r *binReader) uint64() (uint64, error) {
+	if r.off+8 > len(r.b) {
+		return 0, errShortBuffer
+	}
+	v := binary.BigEndian.Uint64(r.b[r.off:])
+	r.off += 8
+	return v, nil
+}
+
 func (r *binReader) int64() (int64, error) {
 	if r.off+8 > len(r.b) {
 		return 0, errShortBuffer

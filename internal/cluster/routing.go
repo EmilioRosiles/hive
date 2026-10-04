@@ -48,29 +48,13 @@ func (m *Cluster) handleForward(payload []byte) ([]byte, error) {
 	return transport.Encode(transport.ForwardResponse{Results: results})
 }
 
-// handleForwardBatch decodes a batch of replicated ops and applies each one
-// in order. Every entry is applied even if an earlier one fails, so one bad
-// op doesn't stop the rest of the batch from reaching the replica; the first
-// error encountered (if any) is returned so the sender still learns of it.
+// handleForwardBatch decodes a batch of replicated ops and applies it through the replicator.
 func (m *Cluster) handleForwardBatch(payload []byte) error {
 	var batch transport.ForwardBatch
 	if err := transport.Decode(payload, &batch); err != nil {
 		return fmt.Errorf("handler: decode forward batch: %w", err)
 	}
-	var firstErr error
-	for _, req := range batch.Requests {
-		def, ok := opRegistry[req.Op]
-		if !ok {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("handler: unknown op %d", req.Op)
-			}
-			continue
-		}
-		if _, err := def.Exec(m, req.Key, req.Args, req.LockToken); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return m.replicator.apply(batch)
 }
 
 // dispatch routes op to the correct node(s) and executes it.
@@ -167,12 +151,12 @@ func (m *Cluster) sendForward(ctx context.Context, nodeID string, req transport.
 // sendForwardBatch encodes and sends a batch of queued replication writes to
 // nodeID. Replication never reads the results of a write, so unlike
 // sendForward there is no response payload to decode — only success/failure.
-func (m *Cluster) sendForwardBatch(ctx context.Context, nodeID string, batch []transport.ForwardRequest) error {
+func (m *Cluster) sendForwardBatch(ctx context.Context, nodeID string, batch transport.ForwardBatch) error {
 	client, ok := m.getClient(nodeID)
 	if !ok {
 		return fmt.Errorf("cluster: no client for node %s", nodeID)
 	}
-	framePayload, err := transport.Encode(transport.ForwardBatch{Requests: batch})
+	framePayload, err := transport.Encode(batch)
 	if err != nil {
 		return err
 	}

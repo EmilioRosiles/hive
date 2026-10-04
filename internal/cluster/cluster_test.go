@@ -522,6 +522,19 @@ func TestEvictDeadPeers_KeepsTombstoneForDeadRetention(t *testing.T) {
 	}
 }
 
+func TestEvictDeadPeers_ForgetsDedupState(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("dead", "127.0.0.1:1002", NodeAlive, 100))
+	m.replicator.apply(transport.ForwardBatch{From: "dead", Seq: 5})
+	m.markDead("dead")
+
+	m.evictDeadPeers()
+
+	if _, ok := m.replicator.applied["dead"]; ok {
+		t.Error("dedup state should be forgotten with the tombstone")
+	}
+}
+
 func TestEvictDeadPeers_EmptyMap_NoOp(t *testing.T) {
 	m := newTestCluster("self")
 	m.evictDeadPeers() // should not panic

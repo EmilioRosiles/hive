@@ -372,13 +372,15 @@ func (m *Cluster) startJanitor() {
 	}
 }
 
-// evictDeadPeers forgets peers that have been Dead for at least DeadRetention.
+// evictDeadPeers forgets peers, and their replication dedup state, once they
+// have been Dead for at least DeadRetention.
 func (m *Cluster) evictDeadPeers() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for nodeID, p := range m.peers {
 		if p.Status == NodeDead && time.Since(p.deadAt) >= m.cfg.DeadRetention {
 			delete(m.peers, nodeID)
+			m.replicator.forget(nodeID)
 			m.logger.Info("cluster: evicted dead peer tombstone", "node", nodeID)
 		}
 	}

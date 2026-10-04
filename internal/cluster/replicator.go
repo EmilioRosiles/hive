@@ -2,7 +2,10 @@ package cluster
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
@@ -13,12 +16,12 @@ type replJob struct {
 	req    transport.ForwardRequest
 }
 
-// replDone reports the outcome of one batch sent to nodeID; the sender then
-// waits on next for its following batch, or nil to exit.
+// replDone reports that a sender finished a batch for nodeID, dead if the peer
+// is gone; the sender then waits on next for its following batch, or an empty one to exit.
 type replDone struct {
 	nodeID string
-	err    error
-	next   chan []transport.ForwardRequest
+	dead   bool
+	next   chan transport.ForwardBatch
 }
 
 // replicator applies replication writes to every peer through one worker,
@@ -29,6 +32,9 @@ type replicator struct {
 	jobs    chan replJob
 	done    chan replDone
 	stopCh  chan struct{}
+	seq     uint64
+	mu      sync.Mutex
+	applied map[string]uint64
 	enabled bool
 }
 
@@ -37,6 +43,8 @@ func newReplicator(mgr *Cluster) *replicator {
 	r := &replicator{
 		mgr:     mgr,
 		stopCh:  make(chan struct{}),
+		seq:     uint64(time.Now().UnixNano()),
+		applied: make(map[string]uint64),
 		enabled: mgr.cfg.ReplicationFactor > 1,
 	}
 	if r.enabled {
@@ -60,7 +68,7 @@ func (r *replicator) enqueue(nodeID string, req transport.ForwardRequest) {
 
 // run appends jobs to per-peer queues and keeps one sender per busy peer.
 // It stops taking jobs while a peer's queue is full, and drops a peer's queue
-// and marks it dead when a send fails.
+// once the peer is Dead.
 func (r *replicator) run() {
 	queues := make(map[string][]transport.ForwardRequest)
 	inflight := make(map[string]bool)
@@ -81,12 +89,11 @@ func (r *replicator) run() {
 			}
 		case d := <-r.done:
 			nodeID = d.nodeID
-			if d.err != nil {
-				r.mgr.markDead(nodeID)
+			if d.dead {
 				delete(queues, nodeID)
 			}
 			batch := r.take(queues, nodeID)
-			if batch == nil {
+			if len(batch.Requests) == 0 {
 				delete(inflight, nodeID)
 			}
 			d.next <- batch
@@ -101,11 +108,12 @@ func (r *replicator) run() {
 	}
 }
 
-// take removes and returns the next batch from nodeID's queue, or nil if it is empty.
-func (r *replicator) take(queues map[string][]transport.ForwardRequest, nodeID string) []transport.ForwardRequest {
+// take removes and returns the next batch from nodeID's queue, or an empty
+// batch if there is none. Each batch gets the next replicator-wide Seq.
+func (r *replicator) take(queues map[string][]transport.ForwardRequest, nodeID string) transport.ForwardBatch {
 	q := queues[nodeID]
 	if len(q) == 0 {
-		return nil
+		return transport.ForwardBatch{}
 	}
 	n := min(len(q), r.mgr.cfg.ReplicationBatchSize)
 	if n == len(q) {
@@ -113,23 +121,84 @@ func (r *replicator) take(queues map[string][]transport.ForwardRequest, nodeID s
 	} else {
 		queues[nodeID] = q[n:]
 	}
-	return q[:n]
+	r.seq++
+	return transport.ForwardBatch{From: r.mgr.cfg.NodeID, Seq: r.seq, Requests: q[:n]}
 }
 
 // send delivers batches to nodeID until run has none left for it.
-func (r *replicator) send(nodeID string, batch []transport.ForwardRequest) {
-	next := make(chan []transport.ForwardRequest, 1)
-	for batch != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), r.mgr.cfg.RoutingTimeout)
-		err := r.mgr.sendForwardBatch(ctx, nodeID, batch)
-		cancel()
+func (r *replicator) send(nodeID string, batch transport.ForwardBatch) {
+	next := make(chan transport.ForwardBatch, 1)
+	for len(batch.Requests) > 0 {
+		dead := !r.deliver(nodeID, batch)
 		select {
-		case r.done <- replDone{nodeID: nodeID, err: err, next: next}:
+		case r.done <- replDone{nodeID: nodeID, dead: dead, next: next}:
 		case <-r.stopCh:
 			return
 		}
 		batch = <-next
 	}
+}
+
+// deliver sends batch to nodeID, retrying every ProbeInterval while the peer
+// is Suspect or the send fails. It returns false once the peer is Dead.
+func (r *replicator) deliver(nodeID string, batch transport.ForwardBatch) bool {
+	for {
+		status, ok := r.mgr.peerStatus(nodeID)
+		if !ok || status == NodeDead {
+			return false
+		}
+		if status == NodeAlive {
+			ctx, cancel := context.WithTimeout(context.Background(), r.mgr.cfg.RoutingTimeout)
+			err := r.mgr.sendForwardBatch(ctx, nodeID, batch)
+			cancel()
+			switch {
+			case err == nil:
+				return true
+			case errors.Is(err, transport.ErrRejected):
+				r.mgr.logger.Warn("replicator: replica rejected batch", "node", nodeID, "err", err)
+				return true
+			}
+			r.mgr.markSuspect(nodeID)
+		}
+		select {
+		case <-time.After(r.mgr.cfg.ProbeInterval):
+		case <-r.stopCh:
+			return false
+		}
+	}
+}
+
+// apply runs a batch received from a peer unless its Seq was already applied.
+// Batches apply one at a time, so a duplicate waits for its original to finish.
+// Every op runs even if an earlier one fails; the first error is returned.
+func (r *replicator) apply(batch transport.ForwardBatch) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if batch.Seq <= r.applied[batch.From] {
+		return nil
+	}
+	r.applied[batch.From] = batch.Seq
+	var firstErr error
+	for _, req := range batch.Requests {
+		def, ok := opRegistry[req.Op]
+		if !ok {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("handler: unknown op %d", req.Op)
+			}
+			continue
+		}
+		if _, err := def.Exec(r.mgr, req.Key, req.Args, req.LockToken); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// forget drops the dedup state kept for a peer.
+func (r *replicator) forget(nodeID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.applied, nodeID)
 }
 
 func (r *replicator) stop() {

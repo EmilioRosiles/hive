@@ -138,7 +138,7 @@ func TestForwardBatch_RoundTrip_Empty(t *testing.T) {
 }
 
 func TestForwardBatch_RoundTrip_MultipleRequests(t *testing.T) {
-	batch := ForwardBatch{Requests: []ForwardRequest{
+	batch := ForwardBatch{From: "node-a", Seq: 1<<40 + 7, Requests: []ForwardRequest{
 		{Op: OpValueSet, Key: "a", Args: [][]byte{[]byte("1")}},
 		{Op: OpHSet, Key: "b", Args: [][]byte{[]byte("field"), []byte("value")}},
 		{Op: OpValueGet, Key: "c"},
@@ -150,6 +150,9 @@ func TestForwardBatch_RoundTrip_MultipleRequests(t *testing.T) {
 	var got ForwardBatch
 	if err := got.UnmarshalBinary(data); err != nil {
 		t.Fatalf("UnmarshalBinary: %v", err)
+	}
+	if got.From != batch.From || got.Seq != batch.Seq {
+		t.Errorf("got From=%q Seq=%d, want %q, %d", got.From, got.Seq, batch.From, batch.Seq)
 	}
 	if len(got.Requests) != len(batch.Requests) {
 		t.Fatalf("got %d requests, want %d", len(got.Requests), len(batch.Requests))
