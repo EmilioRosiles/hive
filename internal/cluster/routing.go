@@ -71,18 +71,19 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 		return nil, fmt.Errorf("cluster: unknown op %d", op)
 	}
 
+	nodes := m.responsibleNodes(key)
 	token := lockTokenFromContext(ctx)
 
 	switch def.Scope {
 	case ScopeRead:
-		return m.execOrForward(ctx, def, op, key, args, token)
+		return m.execOrForward(ctx, def, op, key, args, &nodes, token)
 
 	case ScopeWrite:
-		result, err := m.execOrForward(ctx, def, op, key, args, token)
+		result, err := m.execOrForward(ctx, def, op, key, args, &nodes, token)
 		if err != nil {
 			return nil, err
 		}
-		if nodes := m.responsibleNodes(key); len(nodes) > 1 {
+		if len(nodes) > 1 {
 			req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
 			m.fanOutReplicas(def, req, nodes[1:])
 		}
@@ -95,27 +96,28 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 	return nil, fmt.Errorf("cluster: unhandled scope for op %d", op)
 }
 
-// execOrForward runs op on the key's primary, locally or by forwarding. It retries every RoutingRetryInterval while the
-// primary is Suspect, after a failed read, or after an unsent write, and gives
-// up with ErrUnavailable once RoutingTimeout runs out.
-func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op, key string, args [][]byte, token uint32) ([][]byte, error) {
-	if nodes := m.responsibleNodes(key); len(nodes) > 0 && nodes[0] == m.cfg.NodeID {
+// execOrForward runs op on the key's primary, locally or by forwarding. It
+// retries every RoutingRetryInterval while the primary is Suspect, after a
+// failed read, or after an unsent write, re-resolving *nodes each time so the
+// caller replicates to the current owners, and gives up with ErrUnavailable
+// once RoutingTimeout runs out.
+func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op, key string, args [][]byte, nodes *[]string, token uint32) ([][]byte, error) {
+	if n := *nodes; len(n) > 0 && n[0] == m.cfg.NodeID {
 		return def.Exec(m, key, args, token)
 	}
 	rctx, cancel := context.WithTimeout(ctx, m.cfg.RoutingTimeout)
 	defer cancel()
 	req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
 	for {
-		nodes := m.responsibleNodes(key)
-		if len(nodes) == 0 {
+		n := *nodes
+		if len(n) == 0 {
 			return nil, ErrUnavailable
 		}
-		if nodes[0] == m.cfg.NodeID {
-			result, err := def.Exec(m, key, args, token)
-			return result, err
+		if n[0] == m.cfg.NodeID {
+			return def.Exec(m, key, args, token)
 		}
-		if status, _ := m.peerStatus(nodes[0]); status != NodeSuspect {
-			resp, err := m.sendForward(rctx, nodes[0], req)
+		if status, _ := m.peerStatus(n[0]); status != NodeSuspect {
+			resp, err := m.sendForward(rctx, n[0], req)
 			switch {
 			case err == nil:
 				return resp.Results, nil
@@ -124,7 +126,7 @@ func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op,
 			case ctx.Err() != nil:
 				return nil, ctx.Err()
 			}
-			m.markSuspect(nodes[0])
+			m.markSuspect(n[0])
 			if def.Scope == ScopeWrite && !errors.Is(err, transport.ErrUnsent) {
 				return nil, err
 			}
@@ -137,6 +139,7 @@ func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op,
 			}
 			return nil, ErrUnavailable
 		}
+		*nodes = m.responsibleNodes(key)
 	}
 }
 

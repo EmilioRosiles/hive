@@ -486,3 +486,22 @@ func TestExecOrForward_NoClient_WriteRetried(t *testing.T) {
 		t.Error("a write with no client was never sent, so it should be retried and land on the new primary (self)")
 	}
 }
+
+func TestDispatch_FailoverWrite_ReplicatesToNewOwners(t *testing.T) {
+	m := newTestClusterRF("self", 2)
+	m.addPeer(psRF("peer1", "127.0.0.1:1", NodeAlive, 1, 2))
+	key := keyWithOwners(t, m, "peer1", "self")
+	setStatus(m, "peer1", NodeSuspect)
+	time.AfterFunc(100*time.Millisecond, func() { m.markDead("peer1") })
+
+	if _, err := m.dispatch(t.Context(), transport.OpRPush, key, []byte("x")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	res, err := m.dispatch(t.Context(), transport.OpLLen, key)
+	if err != nil {
+		t.Fatalf("llen: %v", err)
+	}
+	if got := decodeUint64(res[0]); got != 1 {
+		t.Errorf("list length %d, want 1: replication must use the owners after failover, not the stale list", got)
+	}
+}
