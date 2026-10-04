@@ -33,6 +33,7 @@ type Config struct {
 	BindPort             int
 	Seeds                []string
 	RoutingTimeout       time.Duration
+	RoutingRetryInterval time.Duration
 	ConnPoolSize         int
 	ReplicationFactor    int
 	MemLimit             uint64

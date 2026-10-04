@@ -3,7 +3,11 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,12 +30,15 @@ func TestDispatch_Write_ExecutesLocally(t *testing.T) {
 }
 
 // A relay node (0 vnodes) with no owning peers sees an empty ring.
-func TestDispatch_Write_EmptyRing_DoesNotPanic(t *testing.T) {
+func TestDispatch_EmptyRing_ReturnsUnavailable(t *testing.T) {
 	m := newTestCluster("self")
 	m.ring.Remove("self")
 
-	if _, err := m.dispatch(t.Context(), transport.OpValueSet, "key", []byte("value")); err != nil {
-		t.Fatalf("dispatch write: %v", err)
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, "key", []byte("value")); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("write: got %v, want ErrUnavailable", err)
+	}
+	if _, err := m.dispatch(t.Context(), transport.OpValueGet, "key"); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("read: got %v, want ErrUnavailable", err)
 	}
 }
 
@@ -194,13 +201,17 @@ func TestExecOrForward_CallerDeadlineShorterThanRoutingTimeout_WinsOut(t *testin
 		if r.elapsed > time.Second {
 			t.Errorf("caller's 50ms deadline should have won over the 2s RoutingTimeout, took %v", r.elapsed)
 		}
+		if status, _ := m.peerStatus("peer"); status != NodeAlive {
+			t.Errorf("status: got %v, want NodeAlive when the caller gave up", status)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("dispatch did not honor the caller's shorter deadline")
 	}
 }
 
 // TestExecOrForward_BareBackgroundContext_StillBoundedByRoutingTimeout
-// confirms a caller with no deadline is still bounded by RoutingTimeout.
+// confirms a caller with no deadline is still bounded by RoutingTimeout, and
+// gets ErrUnavailable when it runs out.
 func TestExecOrForward_BareBackgroundContext_StillBoundedByRoutingTimeout(t *testing.T) {
 	gate := make(chan struct{}) // never closed — peer never responds
 	m := newForwardingTestCluster(t, gate)
@@ -219,8 +230,8 @@ func TestExecOrForward_BareBackgroundContext_StillBoundedByRoutingTimeout(t *tes
 
 	select {
 	case r := <-done:
-		if !errors.Is(r.err, context.DeadlineExceeded) {
-			t.Errorf("expected context.DeadlineExceeded, got %v", r.err)
+		if !errors.Is(r.err, ErrUnavailable) {
+			t.Errorf("expected ErrUnavailable, got %v", r.err)
 		}
 		if r.elapsed < m.cfg.RoutingTimeout {
 			t.Errorf("returned before RoutingTimeout elapsed: took %v, want >= %v", r.elapsed, m.cfg.RoutingTimeout)
@@ -308,5 +319,168 @@ func TestDispatch_UnlockAndRenew_BypassGuardAndWork(t *testing.T) {
 	// Key should be unlocked now — an ordinary op should succeed.
 	if _, err := m.dispatch(t.Context(), transport.OpValueSet, "k", []byte("v")); err != nil {
 		t.Errorf("Set after Unlock should succeed, got %v", err)
+	}
+}
+
+// keyWithOwners returns a key whose ring owners are exactly owners, in order.
+func keyWithOwners(t *testing.T, m *Cluster, owners ...string) string {
+	t.Helper()
+	for i := range 100000 {
+		key := fmt.Sprintf("k-%d", i)
+		if slices.Equal(m.responsibleNodes(key), owners) {
+			return key
+		}
+	}
+	t.Fatalf("no key owned by %v", owners)
+	return ""
+}
+
+// startDropServer answers pings with an ack and closes the connection on every
+// forward, counting them, so each forward fails after its frame was sent.
+func startDropServer(t *testing.T) (string, *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	var forwards atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				for {
+					f, err := transport.ReadFrame(conn)
+					if err != nil {
+						return
+					}
+					if f.Type == transport.MsgForward {
+						forwards.Add(1)
+						return
+					}
+					transport.WriteFrame(conn, transport.Frame{ID: f.ID, Type: f.Type, Payload: pingAck})
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String(), &forwards
+}
+
+func TestExecOrForward_SuspectPrimary_ForwardsOnceAlive(t *testing.T) {
+	remote := newTestCluster("peer1")
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", startPeerServer(t, remote.handleFrame), NodeAlive, 1))
+	key := keyWithOwners(t, m, "peer1")
+	remote.store.Set(key, newValueStructure(t, []byte("v")))
+	setStatus(m, "peer1", NodeSuspect)
+	time.AfterFunc(100*time.Millisecond, func() { m.markAlive("peer1") })
+
+	res, err := m.dispatch(t.Context(), transport.OpValueGet, key)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(res) == 0 || string(res[0]) != "v" {
+		t.Errorf("got %q, want the primary's value", res)
+	}
+}
+
+func TestExecOrForward_SuspectPrimary_UnresolvedReturnsUnavailable(t *testing.T) {
+	addr, forwards := startDropServer(t)
+	m := newTestCluster("self")
+	m.cfg.RoutingTimeout = 200 * time.Millisecond
+	m.addPeer(ps("peer1", addr, NodeAlive, 1))
+	key := keyWithOwners(t, m, "peer1")
+	setStatus(m, "peer1", NodeSuspect)
+
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, key, []byte("v")); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("got %v, want ErrUnavailable", err)
+	}
+	if n := forwards.Load(); n != 0 {
+		t.Errorf("%d forwards sent to a Suspect primary, want 0", n)
+	}
+}
+
+func TestExecOrForward_SuspectPrimary_DeadFailsOverToNewPrimary(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1", NodeAlive, 1))
+	key := keyWithOwners(t, m, "peer1")
+	setStatus(m, "peer1", NodeSuspect)
+	time.AfterFunc(100*time.Millisecond, func() { m.markDead("peer1") })
+
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, key, []byte("v")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, ok := m.store.Get(key); !ok {
+		t.Error("write should land on the new primary (self) once peer1 is Dead")
+	}
+}
+
+func TestExecOrForward_NetworkFailure_SuspectsPrimary(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1", NodeAlive, 1)) // nothing listens on port 1
+	key := keyWithOwners(t, m, "peer1")
+
+	m.dispatch(t.Context(), transport.OpValueGet, key)
+
+	if status, _ := m.peerStatus("peer1"); status == NodeAlive {
+		t.Error("a failed forward should suspect the primary")
+	}
+}
+
+func TestExecOrForward_DroppedForward_RetriesReadsNotWrites(t *testing.T) {
+	addr, forwards := startDropServer(t)
+	m := newTestCluster("self")
+	m.cfg.RoutingTimeout = 300 * time.Millisecond
+	m.addPeer(ps("peer1", addr, NodeAlive, 1))
+	key := keyWithOwners(t, m, "peer1")
+
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, key, []byte("v")); err == nil || errors.Is(err, ErrUnavailable) {
+		t.Errorf("write: got %v, want the send error (outcome unknown)", err)
+	}
+	if n := forwards.Load(); n != 1 {
+		t.Errorf("write sent %d times, want 1: it may have been applied", n)
+	}
+
+	forwards.Store(0)
+	waitForCond(t, time.Second, "peer1 alive again", func() bool {
+		status, _ := m.peerStatus("peer1")
+		return status == NodeAlive
+	})
+	m.dispatch(t.Context(), transport.OpValueGet, key)
+	if n := forwards.Load(); n < 2 {
+		t.Errorf("read sent %d times, want it retried", n)
+	}
+}
+
+func TestExecOrForward_Rejected_DoesNotSuspect(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", startNodeServer(t, "peer1"), NodeAlive, 1))
+	key := keyWithOwners(t, m, "peer1")
+
+	if _, err := m.dispatch(t.Context(), transport.OpValueGet, key); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("got %v, want ErrNotFound", err)
+	}
+	if status, _ := m.peerStatus("peer1"); status != NodeAlive {
+		t.Errorf("status: got %v, want NodeAlive after a rejection", status)
+	}
+}
+
+func TestExecOrForward_NoClient_WriteRetried(t *testing.T) {
+	m := newTestCluster("self")
+	m.addPeer(ps("peer1", "127.0.0.1:1", NodeAlive, 1))
+	key := keyWithOwners(t, m, "peer1")
+	m.mu.Lock()
+	delete(m.clients, "peer1")
+	m.mu.Unlock()
+
+	if _, err := m.dispatch(t.Context(), transport.OpValueSet, key, []byte("v")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, ok := m.store.Get(key); !ok {
+		t.Error("a write with no client was never sent, so it should be retried and land on the new primary (self)")
 	}
 }

@@ -89,3 +89,16 @@ func TestConfig_DeadRetentionDefault(t *testing.T) {
 		t.Errorf("explicit value overwritten: got %v", c.DeadRetention)
 	}
 }
+
+func TestConfig_RoutingRetryIntervalDefault(t *testing.T) {
+	var c Config
+	c.applyDefaults()
+	if c.RoutingRetryInterval != 50*time.Millisecond {
+		t.Errorf("got %v, want 50ms", c.RoutingRetryInterval)
+	}
+	c = Config{RoutingRetryInterval: time.Second}
+	c.applyDefaults()
+	if c.RoutingRetryInterval != time.Second {
+		t.Errorf("explicit value overwritten: got %v", c.RoutingRetryInterval)
+	}
+}

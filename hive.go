@@ -69,6 +69,7 @@ func NewNode(cfg Config) (*Node, error) {
 		Seeds:                cfg.Seeds,
 		ReplicationFactor:    cfg.ReplicationFactor,
 		RoutingTimeout:       cfg.RoutingTimeout,
+		RoutingRetryInterval: cfg.RoutingRetryInterval,
 		ConnPoolSize:         cfg.ConnPoolSize,
 		MemLimit:             *cfg.MemLimit,
 		GossipInterval:       cfg.GossipInterval,

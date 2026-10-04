@@ -21,6 +21,10 @@ var ErrKeyLocked = store.ErrKeyLocked
 // expired and was re-acquired by a different holder.
 var ErrLockNotHeld = errors.New("hive: lock not held")
 
+// ErrUnavailable is returned when a key's primary can't be reached within
+// RoutingTimeout, or the ring has no owner for it.
+var ErrUnavailable = errors.New("hive: node unavailable")
+
 // ErrInternal is returned for unexpected failures that indicate a Hive bug.
 var ErrInternal = errors.New("hive: internal error")
 

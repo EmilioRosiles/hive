@@ -37,6 +37,7 @@ func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int
 		ReplicationFactor:    rf,
 		MemLimit:             256 << 20, // realistic capacity/vnode count; 0 now means "owns nothing"
 		RoutingTimeout:       time.Second,
+		RoutingRetryInterval: 50 * time.Millisecond,
 		ConnPoolSize:         poolSize,
 		GossipInterval:       100 * time.Millisecond,
 		GossipFanout:         3,

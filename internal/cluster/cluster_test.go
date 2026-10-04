@@ -32,6 +32,7 @@ func newTestClusterRF(nodeID string, rf int) *Cluster {
 			NodeID:               nodeID,
 			ReplicationFactor:    rf,
 			RoutingTimeout:       time.Second,
+			RoutingRetryInterval: 10 * time.Millisecond,
 			GossipTimeout:        300 * time.Millisecond,
 			ProbeTimeout:         300 * time.Millisecond,
 			ProbeHelpers:         3,

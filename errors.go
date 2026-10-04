@@ -22,6 +22,10 @@ var ErrKeyLocked = cluster.ErrKeyLocked
 // re-acquired by a different holder.
 var ErrLockNotHeld = cluster.ErrLockNotHeld
 
+// ErrUnavailable is returned when a key's primary can't be reached within
+// RoutingTimeout, e.g. while it is suspected down. Safe to retry.
+var ErrUnavailable = cluster.ErrUnavailable
+
 // ErrInternal is returned for unexpected failures that indicate a Hive bug,
 // such as an op applied to the wrong data structure kind.
 var ErrInternal = cluster.ErrInternal

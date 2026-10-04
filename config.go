@@ -49,9 +49,14 @@ type Config struct {
 	// replication queue is never allocated, saving memory.
 	ReplicationFactor int
 
-	// RoutingTimeout is how long this nodes waits before cancelling a
-	// routed op (redirect/replicate).
+	// RoutingTimeout is the most time a request may spend reaching its
+	// primary, including waiting out a suspected one, and how long a
+	// replication batch may take. Defaults to 1s.
 	RoutingTimeout time.Duration
+
+	// RoutingRetryInterval is how long a request waits between attempts while
+	// its primary is suspected or after a retryable failure. Defaults to 50ms.
+	RoutingRetryInterval time.Duration
 
 	// ConnPoolSize is the number of pooled connections maintained per peer,
 	// round-robin shared across all traffic to that peer. Defaults to 4.
@@ -158,6 +163,7 @@ func defaultConfig() Config {
 		BindAddr:             "0.0.0.0",
 		BindPort:             7946,
 		RoutingTimeout:       1 * time.Second,
+		RoutingRetryInterval: 50 * time.Millisecond,
 		ConnPoolSize:         4,
 		ReplicationFactor:    1,
 		MemLimit:             Bytes(sys.TotalMemory()),
@@ -192,6 +198,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RoutingTimeout == 0 {
 		c.RoutingTimeout = d.RoutingTimeout
+	}
+	if c.RoutingRetryInterval == 0 {
+		c.RoutingRetryInterval = d.RoutingRetryInterval
 	}
 	if c.ConnPoolSize == 0 {
 		c.ConnPoolSize = d.ConnPoolSize

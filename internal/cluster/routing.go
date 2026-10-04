@@ -2,7 +2,9 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
@@ -69,19 +71,18 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 		return nil, fmt.Errorf("cluster: unknown op %d", op)
 	}
 
-	nodes := m.responsibleNodes(key)
 	token := lockTokenFromContext(ctx)
 
 	switch def.Scope {
 	case ScopeRead:
-		return m.execOrForward(ctx, def, op, key, args, nodes, token)
+		return m.execOrForward(ctx, def, op, key, args, token)
 
 	case ScopeWrite:
-		result, err := m.execOrForward(ctx, def, op, key, args, nodes, token)
+		result, err := m.execOrForward(ctx, def, op, key, args, token)
 		if err != nil {
 			return nil, err
 		}
-		if len(nodes) > 1 {
+		if nodes := m.responsibleNodes(key); len(nodes) > 1 {
 			req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
 			m.fanOutReplicas(def, req, nodes[1:])
 		}
@@ -94,20 +95,49 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 	return nil, fmt.Errorf("cluster: unhandled scope for op %d", op)
 }
 
-// execOrForward runs op locally if this node is the primary owner for key (or
-// there is no other node), otherwise forwards it to the primary and returns
-// its response.
-func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op, key string, args [][]byte, nodes []string, token uint32) ([][]byte, error) {
-	if len(nodes) == 0 || m.cfg.NodeID == nodes[0] {
+// execOrForward runs op on the key's primary, locally or by forwarding. It retries every RoutingRetryInterval while the
+// primary is Suspect, after a failed read, or after an unsent write, and gives
+// up with ErrUnavailable once RoutingTimeout runs out.
+func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op, key string, args [][]byte, token uint32) ([][]byte, error) {
+	if nodes := m.responsibleNodes(key); len(nodes) > 0 && nodes[0] == m.cfg.NodeID {
 		return def.Exec(m, key, args, token)
 	}
-	ctx, cancel := context.WithTimeout(ctx, m.cfg.RoutingTimeout)
+	rctx, cancel := context.WithTimeout(ctx, m.cfg.RoutingTimeout)
 	defer cancel()
-	resp, err := m.sendForward(ctx, nodes[0], transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token})
-	if err != nil {
-		return nil, err
+	req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
+	for {
+		nodes := m.responsibleNodes(key)
+		if len(nodes) == 0 {
+			return nil, ErrUnavailable
+		}
+		if nodes[0] == m.cfg.NodeID {
+			result, err := def.Exec(m, key, args, token)
+			return result, err
+		}
+		if status, _ := m.peerStatus(nodes[0]); status != NodeSuspect {
+			resp, err := m.sendForward(rctx, nodes[0], req)
+			switch {
+			case err == nil:
+				return resp.Results, nil
+			case errors.Is(err, transport.ErrRejected):
+				return nil, remoteErr(err)
+			case ctx.Err() != nil:
+				return nil, ctx.Err()
+			}
+			m.markSuspect(nodes[0])
+			if def.Scope == ScopeWrite && !errors.Is(err, transport.ErrUnsent) {
+				return nil, err
+			}
+		}
+		select {
+		case <-time.After(m.cfg.RoutingRetryInterval):
+		case <-rctx.Done():
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, ErrUnavailable
+		}
 	}
-	return resp.Results, nil
 }
 
 // fanOutReplicas delivers req to each node in nodes. A node that is this node
@@ -129,7 +159,7 @@ func (m *Cluster) fanOutReplicas(def opDef, req transport.ForwardRequest, nodes 
 func (m *Cluster) sendForward(ctx context.Context, nodeID string, req transport.ForwardRequest) (transport.ForwardResponse, error) {
 	client, ok := m.getClient(nodeID)
 	if !ok {
-		return transport.ForwardResponse{}, fmt.Errorf("cluster: no client for node %s", nodeID)
+		return transport.ForwardResponse{}, fmt.Errorf("cluster: no client for node %s: %w", nodeID, transport.ErrUnsent)
 	}
 	framePayload, err := transport.Encode(req)
 	if err != nil {
@@ -137,7 +167,7 @@ func (m *Cluster) sendForward(ctx context.Context, nodeID string, req transport.
 	}
 	respFrame, err := client.Send(ctx, transport.Frame{Type: transport.MsgForward, Payload: framePayload})
 	if err != nil {
-		return transport.ForwardResponse{}, remoteErr(err)
+		return transport.ForwardResponse{}, err
 	}
 	var resp transport.ForwardResponse
 	if len(respFrame.Payload) > 0 {
