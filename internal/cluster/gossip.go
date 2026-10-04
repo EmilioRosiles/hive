@@ -95,7 +95,8 @@ func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 // bootstrap sends a heartbeat to addr and merges the response into our cluster
 // view. This is called once per seed at startup so the ring is populated with
 // real NodeIDs before the gossip loop begins. Unreachable seeds are skipped —
-// at least one must succeed for the node to join the cluster.
+// at least one must succeed for the node to join the cluster. The bootstrap
+// client is kept as the seed's pooled client, so its connection stays in use.
 // If the seed rejects the join (e.g. replication factor mismatch), the node halts.
 func (m *Cluster) bootstrap(addr string) {
 	payload, err := transport.Encode(m.buildHeartbeatRequest())
@@ -103,9 +104,9 @@ func (m *Cluster) bootstrap(addr string) {
 		return
 	}
 	client := m.newClient(addr)
-	defer client.Close()
 	resp, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgHeartbeat, Payload: payload})
 	if err != nil {
+		client.Close()
 		if errors.Is(err, transport.ErrRejected) {
 			m.logger.Error("hive: cluster rejected join", "addr", addr, "reason", err)
 			os.Exit(1)
@@ -114,14 +115,25 @@ func (m *Cluster) bootstrap(addr string) {
 		return
 	}
 	var hbResp transport.HeartbeatResponse
-	if err := transport.Decode(resp.Payload, &hbResp); err != nil {
+	if err := transport.Decode(resp.Payload, &hbResp); err != nil || len(hbResp.Peers) == 0 {
+		client.Close()
 		m.logger.Warn("bootstrap: decode failed", "addr", addr, "err", err)
 		return
 	}
+	seed := hbResp.Peers[0].NodeID // the responder lists itself first
+	_, known := m.getPeer(seed)
 	if err := m.mergeState(hbResp.Peers); err != nil {
+		client.Close()
 		m.logger.Error("hive: cluster rejected join", "addr", addr, "reason", err)
 		os.Exit(1)
 	}
+
+	m.mu.Lock()
+	if fresh, ok := m.clients[seed]; ok && !known {
+		m.clients[seed], client = client, fresh
+	}
+	m.mu.Unlock()
+	client.Close()
 	m.logger.Info("bootstrap: joined via seed", "addr", addr, "peers", len(hbResp.Peers))
 }
 
@@ -230,7 +242,8 @@ func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 	return transport.HeartbeatRequest{Peers: peers}
 }
 
-// announceLeave notifies all known peers that this node is departing.
+// announceLeave notifies every peer we hold a client for (all but the Dead
+// ones) that this node is departing.
 func (m *Cluster) announceLeave() {
 	m.incarnation.Store(math.MaxUint64)
 	payload, err := transport.Encode(transport.LeaveRequest{NodeID: m.cfg.NodeID})
@@ -241,14 +254,12 @@ func (m *Cluster) announceLeave() {
 
 	m.mu.RLock()
 	var wg sync.WaitGroup
-	for _, p := range m.peers {
+	for _, c := range m.clients {
 		wg.Add(1)
-		go func(addr string) {
+		go func() {
 			defer wg.Done()
-			c := m.newClient(addr)
-			defer c.Close()
 			c.Send(context.Background(), frame)
-		}(p.Addr)
+		}()
 	}
 	m.mu.RUnlock()
 

@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"io"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -326,4 +328,75 @@ func TestBuildHeartbeatRequest_DeadPeersIncluded(t *testing.T) {
 		}
 	}
 	t.Error("dead peer should be included in heartbeat so the dead state propagates")
+}
+
+// countingProxy forwards connections to backend and counts how many it accepted.
+func countingProxy(t *testing.T, backend string) (string, *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	var accepts atomic.Int32
+	go func() {
+		for {
+			a, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			b, err := net.Dial("tcp", backend)
+			if err != nil {
+				a.Close()
+				continue
+			}
+			go func() { io.Copy(b, a); b.Close() }()
+			go func() { io.Copy(a, b); a.Close() }()
+		}
+	}()
+	return ln.Addr().String(), &accepts
+}
+
+func TestBootstrap_KeepsSeedConnection(t *testing.T) {
+	seed := newTestCluster("seed") // its own entry advertises no address
+	addr, accepts := countingProxy(t, startPeerServer(t, seed.handleFrame))
+	m := newTestCluster("self")
+
+	m.bootstrap(addr)
+
+	if got := m.ping("seed", "seed"); got != probeAck {
+		t.Fatalf("ping over the seed's client: got %v, want ack", got)
+	}
+	if n := accepts.Load(); n != 1 {
+		t.Errorf("%d connections to the seed, want 1: the bootstrap connection should be kept", n)
+	}
+}
+
+func TestAnnounceLeave_UsesPooledClients(t *testing.T) {
+	peer := newTestCluster("peer")
+	left := make(chan struct{}, 1)
+	backend := startPeerServer(t, func(msgType transport.MsgType, payload []byte) ([]byte, error) {
+		if msgType == transport.MsgLeave {
+			left <- struct{}{}
+		}
+		return peer.handleFrame(msgType, payload)
+	})
+	addr, accepts := countingProxy(t, backend)
+	m := newTestCluster("self")
+	m.addPeer(ps("peer", addr, NodeAlive, 1))
+	if got := m.ping("peer", "peer"); got != probeAck {
+		t.Fatalf("ping: got %v, want ack", got)
+	}
+
+	m.announceLeave()
+
+	select {
+	case <-left:
+	case <-time.After(time.Second):
+		t.Fatal("peer never received MsgLeave")
+	}
+	if n := accepts.Load(); n != 1 {
+		t.Errorf("%d connections to the peer, want 1: the leave should reuse the pooled connection", n)
+	}
 }
