@@ -156,7 +156,7 @@ func newForwardingTestCluster(t *testing.T, gate chan struct{}) *Cluster {
 	srv, err := transport.NewServer("127.0.0.1:0", func(msgType transport.MsgType, payload []byte) ([]byte, error) {
 		<-gate
 		return nil, errors.New("newForwardingTestCluster: peer should never respond")
-	}, nil, slog.Default())
+	}, nil, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("newForwardingTestCluster: %v", err)
 	}
@@ -358,11 +358,13 @@ func startDropServer(t *testing.T) (string, *atomic.Int32) {
 					if err != nil {
 						return
 					}
-					if f.Type == transport.MsgForward {
+					switch f.Type {
+					case transport.MsgForward:
 						forwards.Add(1)
 						return
+					case transport.MsgPing:
+						transport.WriteFrame(conn, transport.Frame{ID: f.ID, Type: f.Type, Payload: pingAck, Resp: true})
 					}
-					transport.WriteFrame(conn, transport.Frame{ID: f.ID, Type: f.Type, Payload: pingAck})
 				}
 			}()
 		}

@@ -26,7 +26,7 @@ func TestClient_RoundTrip_MsgForward(t *testing.T) {
 	handler, received := echoHandler(t, map[MsgType][]byte{MsgForward: respPayload})
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
+	client := NewClient(s.Addr().String(), "", nil, nil, 1, slog.Default())
 	defer client.Close()
 
 	frame, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: reqPayload})
@@ -52,7 +52,7 @@ func TestClient_HandlerError_ReturnsErrRejected(t *testing.T) {
 	}
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
+	client := NewClient(s.Addr().String(), "", nil, nil, 1, slog.Default())
 	defer client.Close()
 
 	_, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")})
@@ -73,7 +73,7 @@ func TestClient_ConcurrentSends_MultiplexedOverOneConnection(t *testing.T) {
 	}
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
+	client := NewClient(s.Addr().String(), "", nil, nil, 1, slog.Default())
 	defer client.Close()
 
 	const n = 100
@@ -111,7 +111,7 @@ func TestClient_Pool_RoundRobinAcrossDistinctConnections(t *testing.T) {
 	s := startTestServer(t, handler)
 
 	const poolSize = 3
-	client := NewClient(s.Addr().String(), nil, poolSize, slog.Default())
+	client := NewClient(s.Addr().String(), "", nil, nil, poolSize, slog.Default())
 	defer client.Close()
 
 	for i := 0; i < poolSize; i++ {
@@ -120,9 +120,9 @@ func TestClient_Pool_RoundRobinAcrossDistinctConnections(t *testing.T) {
 		}
 	}
 
-	seen := make(map[*mux]bool)
-	for i := range client.muxes {
-		m := client.muxes[i].Load()
+	seen := make(map[*conn]bool)
+	for i := range client.conns {
+		m := client.conns[i].Load()
 		if m == nil {
 			t.Fatalf("slot %d: never dialed", i)
 		}
@@ -138,21 +138,21 @@ func TestClient_Pool_CloseClosesAllConnections(t *testing.T) {
 	s := startTestServer(t, handler)
 
 	const poolSize = 3
-	client := NewClient(s.Addr().String(), nil, poolSize, slog.Default())
+	client := NewClient(s.Addr().String(), "", nil, nil, poolSize, slog.Default())
 	for i := 0; i < poolSize; i++ {
 		if _, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 	}
 
-	muxes := make([]*mux, poolSize)
-	for i := range client.muxes {
-		muxes[i] = client.muxes[i].Load()
+	conns := make([]*conn, poolSize)
+	for i := range client.conns {
+		conns[i] = client.conns[i].Load()
 	}
 
 	client.Close()
 
-	for i, m := range muxes {
+	for i, m := range conns {
 		if !m.closed() {
 			t.Errorf("slot %d: mux still open after Close", i)
 		}
@@ -164,7 +164,7 @@ func TestClient_Pool_ReconnectsOnlyDeadSlot(t *testing.T) {
 	s := startTestServer(t, handler)
 
 	const poolSize = 2
-	client := NewClient(s.Addr().String(), nil, poolSize, slog.Default())
+	client := NewClient(s.Addr().String(), "", nil, nil, poolSize, slog.Default())
 	defer client.Close()
 
 	for i := 0; i < poolSize; i++ {
@@ -173,8 +173,8 @@ func TestClient_Pool_ReconnectsOnlyDeadSlot(t *testing.T) {
 		}
 	}
 
-	live := client.muxes[1].Load()
-	dead := client.muxes[0].Load()
+	live := client.conns[1].Load()
+	dead := client.conns[0].Load()
 	dead.shutdown(nil) // simulate slot 0's connection dying
 
 	for i := 0; i < poolSize; i++ {
@@ -183,13 +183,13 @@ func TestClient_Pool_ReconnectsOnlyDeadSlot(t *testing.T) {
 		}
 	}
 
-	if client.muxes[0].Load() == dead {
+	if client.conns[0].Load() == dead {
 		t.Error("slot 0: still pointing at the dead mux, want a fresh redialed one")
 	}
-	if got := client.muxes[0].Load(); got == nil || got.closed() {
+	if got := client.conns[0].Load(); got == nil || got.closed() {
 		t.Error("slot 0: expected a live redialed connection")
 	}
-	if client.muxes[1].Load() != live {
+	if client.conns[1].Load() != live {
 		t.Error("slot 1: should be untouched by slot 0's reconnect")
 	}
 }
@@ -198,7 +198,7 @@ func TestClient_Pool_SendAfterClose_DoesNotRedial(t *testing.T) {
 	handler := func(msgType MsgType, payload []byte) ([]byte, error) { return payload, nil }
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
+	client := NewClient(s.Addr().String(), "", nil, nil, 1, slog.Default())
 	if _, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -208,13 +208,13 @@ func TestClient_Pool_SendAfterClose_DoesNotRedial(t *testing.T) {
 	if !errors.Is(err, ErrUnsent) {
 		t.Errorf("got %v, want an error wrapping ErrUnsent", err)
 	}
-	if m := client.muxes[0].Load(); m != nil {
+	if m := client.conns[0].Load(); m != nil {
 		t.Error("Send after Close dialed a new connection")
 	}
 }
 
 func TestClient_Send_DialFailure_WrapsErrUnsent(t *testing.T) {
-	client := NewClient("127.0.0.1:1", nil, 1, slog.Default()) // nothing listens on port 1
+	client := NewClient("127.0.0.1:1", "", nil, nil, 1, slog.Default()) // nothing listens on port 1
 	defer client.Close()
 
 	_, err := client.Send(context.Background(), Frame{Type: MsgForward})
@@ -255,7 +255,7 @@ func TestClient_Send_ClosedAfterWrite_NotRetried(t *testing.T) {
 		}
 	}()
 
-	client := NewClient(ln.Addr().String(), nil, 1, slog.Default())
+	client := NewClient(ln.Addr().String(), "", nil, nil, 1, slog.Default())
 	defer client.Close()
 
 	_, err = client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")})
@@ -282,7 +282,7 @@ func TestClient_RoundTrip_MsgRebalance(t *testing.T) {
 	handler, received := echoHandler(t, nil)
 	s := startTestServer(t, handler)
 
-	client := NewClient(s.Addr().String(), nil, 1, slog.Default())
+	client := NewClient(s.Addr().String(), "", nil, nil, 1, slog.Default())
 	defer client.Close()
 
 	frame, err := client.Send(context.Background(), Frame{Type: MsgRebalance, Payload: payload})
@@ -294,5 +294,49 @@ func TestClient_RoundTrip_MsgRebalance(t *testing.T) {
 	}
 	if recv := received(); len(recv) != 1 {
 		t.Fatalf("handler invoked %d times, want 1", len(recv))
+	}
+}
+
+// TestServer_AdoptsHelloConn_PeerSendsBackOverIt checks that once A dials B,
+// B's Client for A sends over that connection instead of dialing, and A's
+// connection serves B's request.
+func TestServer_AdoptsHelloConn_PeerSendsBackOverIt(t *testing.T) {
+	clientB := NewClient("127.0.0.1:1", "B", nil, nil, 1, slog.Default()) // dialing A would fail
+	defer clientB.Close()
+	srv, err := NewServer("127.0.0.1:0", func(MsgType, []byte) ([]byte, error) { return []byte("from B"), nil },
+		func(nodeID string) (*Client, bool) { return clientB, nodeID == "A" }, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() { srv.Close() })
+
+	clientA := NewClient(srv.Addr().String(), "A", func(MsgType, []byte) ([]byte, error) { return []byte("from A"), nil }, nil, 1, slog.Default())
+	defer clientA.Close()
+	if resp, err := clientA.Send(t.Context(), Frame{Type: MsgForward}); err != nil || string(resp.Payload) != "from B" {
+		t.Fatalf("A -> B: got %q, %v", resp.Payload, err)
+	}
+
+	resp, err := clientB.Send(t.Context(), Frame{Type: MsgForward})
+	if err != nil || string(resp.Payload) != "from A" {
+		t.Fatalf("B -> A over the adopted connection: got %q, %v", resp.Payload, err)
+	}
+}
+
+func TestClient_Adopt_FullPool_KeepsExistingConn(t *testing.T) {
+	s := startTestServer(t, func(MsgType, []byte) ([]byte, error) { return nil, nil })
+	client := NewClient(s.Addr().String(), "", nil, nil, 1, slog.Default())
+	defer client.Close()
+	if _, err := client.Send(t.Context(), Frame{Type: MsgForward}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	dialed := client.conns[0].Load()
+
+	a, b := net.Pipe()
+	defer b.Close()
+	client.adopt(newConn(a, nil, slog.Default()))
+
+	if client.conns[0].Load() != dialed {
+		t.Error("adopt replaced a live connection in a full pool")
 	}
 }

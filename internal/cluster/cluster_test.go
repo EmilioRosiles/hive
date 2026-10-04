@@ -226,7 +226,7 @@ func TestAddPeer_KeepsSuspect(t *testing.T) {
 // startPeerServer serves handler on a random local port for the test's duration.
 func startPeerServer(t *testing.T, handler transport.Handler) string {
 	t.Helper()
-	srv, err := transport.NewServer("127.0.0.1:0", handler, nil, slog.Default())
+	srv, err := transport.NewServer("127.0.0.1:0", handler, nil, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

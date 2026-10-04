@@ -109,7 +109,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 
 	if cfg.Clustered {
 		addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.BindPort)
-		srv, err := transport.NewServer(addr, m.handleFrame, cfg.TLSConfig, cfg.Logger)
+		srv, err := transport.NewServer(addr, m.handleFrame, m.getClient, cfg.TLSConfig, cfg.Logger)
 		if err != nil {
 			return nil, err
 		}
@@ -412,7 +412,7 @@ func (m *Cluster) peerStatus(nodeID string) (NodeStatus, bool) {
 // newClient builds a transport client for addr, applying this node's TLS
 // config (nil means plaintext) and connection pool size.
 func (m *Cluster) newClient(addr string) *transport.Client {
-	return transport.NewClient(addr, m.cfg.TLSConfig, m.cfg.ConnPoolSize, m.logger)
+	return transport.NewClient(addr, m.cfg.NodeID, m.handleFrame, m.cfg.TLSConfig, m.cfg.ConnPoolSize, m.logger)
 }
 
 // getClient returns the transport client for a peer node ID.

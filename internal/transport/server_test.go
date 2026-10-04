@@ -25,7 +25,7 @@ func echoHandler(t *testing.T, responses map[MsgType][]byte) (Handler, func() []
 
 func startTestServer(t *testing.T, handler Handler) *Server {
 	t.Helper()
-	s, err := NewServer("127.0.0.1:0", handler, nil, slog.Default())
+	s, err := NewServer("127.0.0.1:0", handler, nil, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -223,7 +223,7 @@ var (
 // A connection accepted just before Close, but registered after it, must not
 // keep being served.
 func TestServer_ConnRegisteredAfterClose_IsClosed(t *testing.T) {
-	s, err := NewServer("127.0.0.1:0", func(MsgType, []byte) ([]byte, error) { return nil, nil }, nil, slog.Default())
+	s, err := NewServer("127.0.0.1:0", func(MsgType, []byte) ([]byte, error) { return nil, nil }, nil, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

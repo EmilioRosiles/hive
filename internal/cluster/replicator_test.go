@@ -30,7 +30,7 @@ type fakePeer struct {
 func newFakePeer(t *testing.T) *fakePeer {
 	t.Helper()
 	fp := &fakePeer{}
-	srv, err := transport.NewServer("127.0.0.1:0", fp.handle, nil, slog.Default())
+	srv, err := transport.NewServer("127.0.0.1:0", fp.handle, nil, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("newFakePeer: %v", err)
 	}

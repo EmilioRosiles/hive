@@ -76,6 +76,11 @@ func killUngracefully(m *Cluster) {
 		if m.server != nil {
 			m.server.Close()
 		}
+		m.mu.Lock()
+		for _, c := range m.clients {
+			c.Close()
+		}
+		m.mu.Unlock()
 	})
 }
 
