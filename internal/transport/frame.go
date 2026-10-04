@@ -18,7 +18,8 @@ const (
 	MsgForwardBatch                    // batched replication ops from a peer's replicator
 	MsgRebalance                       // bulk key migration during rebalance
 	MsgLeave                           // graceful departure announcement
-	MsgProbe                           // indirect reachability probe
+	MsgPing                            // liveness probe for a node ID, answered directly or relayed once
+	MsgHello                           // first frame on a dialed connection, carrying the dialer's node ID
 )
 
 // Frame is the envelope wrapping every message on the wire, written and read
@@ -33,12 +34,14 @@ type Frame struct {
 	// (see codec.go).
 	Payload []byte
 	Err     string // non-empty if the handler returned an error
+	Resp    bool   // set on responses, so a connection can carry requests both ways
 }
 
 const (
 	frameHeaderSize = 10       // PayloadLen(4) + ID(4) + Type(1) + Flags(1)
 	maxFrameSize    = 64 << 20 // guards against a corrupt/garbage length prefix
 	flagErr         = 1 << 0   // payload bytes are a UTF-8 error string, not Frame.Payload
+	flagResp        = 1 << 1   // frame is a response to a request with the same ID
 )
 
 // ErrFrameTooLarge is returned when a frame's declared payload length exceeds maxFrameSize.
@@ -50,7 +53,7 @@ var ErrFrameTooLarge = errors.New("transport: frame exceeds max size")
 //	offset 0: PayloadLen uint32  // length of the bytes that follow
 //	offset 4: ID         uint32
 //	offset 8: Type       uint8
-//	offset 9: Flags      uint8   // bit 0 = error frame
+//	offset 9: Flags      uint8   // bit 0 = error frame, bit 1 = response
 //
 // If f.Err is non-empty, its bytes are written as the payload instead of
 // f.Payload; a frame never carries both.
@@ -60,6 +63,9 @@ func WriteFrame(w io.Writer, f Frame) error {
 	if f.Err != "" {
 		flags |= flagErr
 		payload = []byte(f.Err)
+	}
+	if f.Resp {
+		flags |= flagResp
 	}
 	if len(payload) > maxFrameSize {
 		return fmt.Errorf("transport: encode frame: %w", ErrFrameTooLarge)
@@ -94,6 +100,7 @@ func ReadFrame(r io.Reader) (Frame, error) {
 	f := Frame{
 		ID:   binary.BigEndian.Uint32(hdr[4:8]),
 		Type: MsgType(hdr[8]),
+		Resp: hdr[9]&flagResp != 0,
 	}
 	if payloadLen == 0 {
 		return f, nil
@@ -112,8 +119,7 @@ func ReadFrame(r io.Reader) (Frame, error) {
 
 // frameWriter serializes WriteFrame+Flush calls from multiple goroutines onto
 // one underlying bufio.Writer, so a frame's header and payload always reach
-// the socket as one atomic write. Shared by Server and mux, which both need
-// this guarantee.
+// the socket as one atomic write.
 type frameWriter struct {
 	mu sync.Mutex
 	w  *bufio.Writer

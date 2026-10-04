@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -219,5 +220,95 @@ func TestHandleRebalance_InvalidPayload_ReturnsError(t *testing.T) {
 
 	if _, err := m.handleRebalance([]byte("not-msgpack")); err == nil {
 		t.Error("invalid payload should return error")
+	}
+}
+
+// moveKeysToPeer stores keys on m, then gives peer1 (at addr) most of the ring,
+// returning the keys peer1 now owns. The ring is changed directly so no
+// background rebalance races the test's own run.
+func moveKeysToPeer(t *testing.T, m *Cluster, addr string) []string {
+	t.Helper()
+	for i := range 100 {
+		m.store.Set(fmt.Sprintf("k%d", i), newValueStructure(t, []byte("v")))
+	}
+	m.mu.Lock()
+	m.peers["peer1"] = &PeerInfo{NodeID: "peer1", Addr: addr, Status: NodeAlive}
+	m.clients["peer1"] = m.newClient(addr)
+	m.mu.Unlock()
+	m.ring.Add("peer1", 1000)
+
+	var moved []string
+	for i := range 100 {
+		if key := fmt.Sprintf("k%d", i); m.ring.Get(key)[0] == "peer1" {
+			moved = append(moved, key)
+		}
+	}
+	if len(moved) == 0 {
+		t.Fatal("no key moved to peer1")
+	}
+	return moved
+}
+
+func TestRebalance_FailedSend_KeepsKeysAndRetries(t *testing.T) {
+	m := newTestCluster("self")
+	moved := moveKeysToPeer(t, m, "127.0.0.1:1") // nothing listens on port 1
+	setStatus(m, "peer1", NodeSuspect)           // no probe, so peer1 stays in the ring
+
+	m.rebalancer.run()
+
+	for _, key := range moved {
+		if _, ok := m.store.Get(key); !ok {
+			t.Fatalf("key %q deleted although its migration failed", key)
+		}
+	}
+	if m.rebalancer.lastRing.GetVersion() == m.ring.GetVersion() {
+		t.Error("a failed migration should leave the ring diff pending for the next run")
+	}
+}
+
+func TestRebalance_DeliveredSend_DeletesKeys(t *testing.T) {
+	m := newTestCluster("self")
+	moved := moveKeysToPeer(t, m, startNodeServer(t, "peer1"))
+
+	m.rebalancer.run()
+
+	for _, key := range moved {
+		if _, ok := m.store.Get(key); ok {
+			t.Fatalf("key %q kept although peer1 received it", key)
+		}
+	}
+	if m.rebalancer.lastRing.GetVersion() != m.ring.GetVersion() {
+		t.Error("a completed rebalance should record the new ring")
+	}
+}
+
+func TestRebalance_HungTarget_TimesOutAndKeepsKeys(t *testing.T) {
+	release := make(chan struct{})
+	addr := startPeerServer(t, func(msgType transport.MsgType, _ []byte) ([]byte, error) {
+		if msgType == transport.MsgRebalance {
+			<-release
+		}
+		return pingAck, nil
+	})
+	t.Cleanup(func() { close(release) })
+	m := newTestCluster("self")
+	m.cfg.RebalanceTimeout = 100 * time.Millisecond
+	moved := moveKeysToPeer(t, m, addr)
+
+	done := make(chan struct{})
+	go func() {
+		m.rebalancer.run()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rebalance blocked on a target that never answers")
+	}
+
+	for _, key := range moved {
+		if _, ok := m.store.Get(key); !ok {
+			t.Fatalf("key %q deleted although its migration timed out", key)
+		}
 	}
 }

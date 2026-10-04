@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bufio"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -14,19 +13,22 @@ import (
 type Handler func(msgType MsgType, payload []byte) ([]byte, error)
 
 // Server listens for inbound peer connections and dispatches frames to a Handler.
-// Each accepted connection is kept alive and can carry multiple concurrent requests.
+// A connection whose dialer identifies itself with MsgHello is adopted by that
+// peer's Client, so this node can send over it too.
 type Server struct {
 	ln      net.Listener
 	handler Handler
+	clients func(nodeID string) (*Client, bool)
 	stop    chan struct{}
 	mu      sync.Mutex
 	conns   map[net.Conn]struct{}
 	logger  *slog.Logger
 }
 
-// NewServer creates a TCP server bound to addr. If tlsConfig is non-nil,
-// connections are accepted over TLS using it; nil means plaintext.
-func NewServer(addr string, handler Handler, tlsConfig *tls.Config, logger *slog.Logger) (*Server, error) {
+// NewServer creates a TCP server bound to addr. clients looks up a peer's Client
+// for adoption and may be nil. If tlsConfig is non-nil, connections are
+// accepted over TLS using it; nil means plaintext.
+func NewServer(addr string, handler Handler, clients func(nodeID string) (*Client, bool), tlsConfig *tls.Config, logger *slog.Logger) (*Server, error) {
 	var ln net.Listener
 	var err error
 	if tlsConfig != nil {
@@ -37,7 +39,7 @@ func NewServer(addr string, handler Handler, tlsConfig *tls.Config, logger *slog
 	if err != nil {
 		return nil, fmt.Errorf("transport: listen %s: %w", addr, err)
 	}
-	return &Server{ln: ln, handler: handler, stop: make(chan struct{}), conns: make(map[net.Conn]struct{}), logger: logger}, nil
+	return &Server{ln: ln, handler: handler, clients: clients, stop: make(chan struct{}), conns: make(map[net.Conn]struct{}), logger: logger}, nil
 }
 
 // Addr returns the address the server is listening on.
@@ -62,41 +64,37 @@ func (s *Server) Serve() {
 	}
 }
 
-// handleConn reads frames from a single persistent connection until it closes.
-// Each frame is dispatched concurrently; the response is written back with the
-// same ID so the remote mux can route it to the correct waiting goroutine.
-func (s *Server) handleConn(conn net.Conn) {
+// handleConn serves a single persistent connection until it closes.
+// A connection registered after Close has started is refused, so it can't outlive the server.
+func (s *Server) handleConn(nc net.Conn) {
 	s.mu.Lock()
-	s.conns[conn] = struct{}{}
+	select {
+	case <-s.stop:
+		s.mu.Unlock()
+		nc.Close()
+		return
+	default:
+		s.conns[nc] = struct{}{}
+	}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		delete(s.conns, conn)
+		delete(s.conns, nc)
 		s.mu.Unlock()
-		conn.Close()
 	}()
 
-	r := bufio.NewReader(conn)
-	w := newFrameWriter(conn)
+	c := newConn(nc, s.handler, s.logger)
+	c.onHello = s.adopt
+	c.readLoop()
+}
 
-	for {
-		frame, err := ReadFrame(r)
-		if err != nil {
-			// Connection closed or peer went away — normal exit.
-			return
-		}
-
-		go func(f Frame) {
-			respPayload, handlerErr := s.handler(f.Type, f.Payload)
-			resp := Frame{ID: f.ID, Type: f.Type, Payload: respPayload}
-			if handlerErr != nil {
-				s.logger.Warn("transport: handler error", "type", f.Type, "err", handlerErr)
-				resp.Err = handlerErr.Error()
-			}
-			if err := w.write(resp); err != nil {
-				s.logger.Warn("transport: encode response failed", "err", err)
-			}
-		}(frame)
+// adopt hands an inbound connection to the Client for nodeID, if there is one.
+func (s *Server) adopt(nodeID string, c *conn) {
+	if s.clients == nil {
+		return
+	}
+	if client, ok := s.clients(nodeID); ok {
+		client.adopt(c)
 	}
 }
 

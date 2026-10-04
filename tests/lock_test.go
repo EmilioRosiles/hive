@@ -1,7 +1,7 @@
 package tests
 
 import (
-	"strings"
+	"errors"
 	"testing"
 	"time"
 
@@ -33,11 +33,8 @@ func TestCluster_Lock_WorksAcrossForwarding(t *testing.T) {
 		t.Fatalf("Lock (forwarded): %v", err)
 	}
 
-	// Errors crossing a forward lose Go type identity (transport.ErrRejected
-	// carries only the message string), so this checks the message instead
-	// of errors.Is — see standalone_test.go for the errors.Is version.
-	if _, err := store.Get(t.Context(), "alice"); err == nil || !strings.Contains(err.Error(), hive.ErrKeyLocked.Error()) {
-		t.Errorf("forwarded Get without auth: got %v, want an error containing %q", err, hive.ErrKeyLocked.Error())
+	if _, err := store.Get(t.Context(), "alice"); !errors.Is(err, hive.ErrKeyLocked) {
+		t.Errorf("forwarded Get without auth: got %v, want ErrKeyLocked", err)
 	}
 
 	// With lock.Context(), the token must ride the forward request and be
@@ -56,5 +53,11 @@ func TestCluster_Lock_WorksAcrossForwarding(t *testing.T) {
 	}
 	if _, err := store.Get(t.Context(), "alice"); err != nil {
 		t.Errorf("Get after Unlock should succeed, got %v", err)
+	}
+	if err := lock.Unlock(t.Context()); !errors.Is(err, hive.ErrLockNotHeld) {
+		t.Errorf("forwarded second Unlock: got %v, want ErrLockNotHeld", err)
+	}
+	if _, err := store.Get(t.Context(), "bob"); !errors.Is(err, hive.ErrNotFound) {
+		t.Errorf("forwarded Get of missing key: got %v, want ErrNotFound", err)
 	}
 }

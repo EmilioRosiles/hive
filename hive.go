@@ -66,19 +66,26 @@ func NewNode(cfg Config) (*Node, error) {
 		NodeID:               cfg.NodeID,
 		BindAddr:             cfg.BindAddr,
 		BindPort:             cfg.BindPort,
+		AdvertiseAddr:        cfg.AdvertiseAddr,
 		Seeds:                cfg.Seeds,
 		ReplicationFactor:    cfg.ReplicationFactor,
 		RoutingTimeout:       cfg.RoutingTimeout,
+		RoutingRetryInterval: cfg.RoutingRetryInterval,
 		ConnPoolSize:         cfg.ConnPoolSize,
 		MemLimit:             *cfg.MemLimit,
 		GossipInterval:       cfg.GossipInterval,
 		GossipFanout:         cfg.GossipFanout,
 		GossipTimeout:        cfg.GossipTimeout,
+		ProbeTimeout:         cfg.ProbeTimeout,
+		ProbeHelpers:         cfg.ProbeHelpers,
+		ProbeInterval:        cfg.ProbeInterval,
 		RebalanceDebounce:    cfg.RebalanceDebounce,
 		RebalanceBatchSize:   cfg.RebalanceBatchSize,
+		RebalanceTimeout:     cfg.RebalanceTimeout,
 		ReplicationQueueSize: cfg.ReplicationQueueSize,
 		ReplicationBatchSize: cfg.ReplicationBatchSize,
 		CleanupInterval:      cfg.CleanupInterval,
+		DeadRetention:        cfg.DeadRetention,
 		Clustered:            cfg.Mode == ModeCluster,
 		TLSConfig:            cfg.TLSConfig,
 		Logger:               logger,
@@ -113,9 +120,9 @@ func (n *Node) ID() string {
 	return n.cfg.NodeID
 }
 
-// Addr returns the address this node listens on for peer communication.
+// Addr returns the address peers use to reach this node.
 func (n *Node) Addr() string {
-	return fmt.Sprintf("%s:%d", n.cfg.BindAddr, n.cfg.BindPort)
+	return n.cfg.AdvertiseAddr
 }
 
 // MemUsed returns this node's current estimated local byte usage.
@@ -172,7 +179,7 @@ func (c *Cluster) Members() []Member {
 
 	out = append(out, Member{
 		NodeID:            c.cfg.NodeID,
-		Addr:              fmt.Sprintf("%s:%d", c.cfg.BindAddr, c.cfg.BindPort),
+		Addr:              c.cfg.AdvertiseAddr,
 		Alive:             true,
 		ReplicationFactor: c.cfg.ReplicationFactor,
 		MemLimit:          *c.cfg.MemLimit,
@@ -183,7 +190,7 @@ func (c *Cluster) Members() []Member {
 		out = append(out, Member{
 			NodeID:            p.NodeID,
 			Addr:              p.Addr,
-			Alive:             p.Status == cluster.NodeAlive,
+			Alive:             p.Status != cluster.NodeDead,
 			ReplicationFactor: p.ReplicationFactor,
 			MemLimit:          p.MemLimit,
 			MemUsed:           p.MemUsed,
@@ -197,7 +204,7 @@ func (c *Cluster) Members() []Member {
 func (c *Cluster) AliveCount() int {
 	alive := 1 // this node
 	for _, p := range c.internal.Peers() {
-		if p.Status == cluster.NodeAlive {
+		if p.Status != cluster.NodeDead {
 			alive++
 		}
 	}

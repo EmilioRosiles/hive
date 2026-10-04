@@ -22,9 +22,11 @@ type ForwardResponse struct {
 	Results [][]byte
 }
 
-// ForwardBatch carries multiple ForwardRequests in one frame, sent by a
-// peer's replicator when it has more than one queued write to apply.
+// ForwardBatch carries replicated ForwardRequests in one frame. Seq increases
+// with every batch From sends, so the receiver can skip a retried duplicate.
 type ForwardBatch struct {
+	From     string
+	Seq      uint64
 	Requests []ForwardRequest
 }
 
@@ -173,6 +175,9 @@ func (r *ForwardResponse) UnmarshalBinary(data []byte) error {
 //
 // Wire layout:
 //
+//	FromLen      uint32
+//	From         [FromLen]byte
+//	Seq          uint64
 //	RequestCount uint32
 //	repeated RequestCount times: ForwardRequest (same layout as above)
 
@@ -182,13 +187,16 @@ func (r *ForwardResponse) UnmarshalBinary(data []byte) error {
 const forwardRequestMinSize = 1 + 4 + 4 + 4
 
 func (b ForwardBatch) MarshalBinary() ([]byte, error) {
-	size := 4
+	size := 4 + len(b.From) + 8 + 4
 	for _, r := range b.Requests {
 		size += r.encodedSize()
 	}
 	buf := make([]byte, size)
-	i := 4
-	binary.BigEndian.PutUint32(buf[0:], uint32(len(b.Requests)))
+	binary.BigEndian.PutUint32(buf, uint32(len(b.From)))
+	i := 4 + copy(buf[4:], b.From)
+	binary.BigEndian.PutUint64(buf[i:], b.Seq)
+	binary.BigEndian.PutUint32(buf[i+8:], uint32(len(b.Requests)))
+	i += 12
 	for _, r := range b.Requests {
 		i = r.encodeInto(buf, i)
 	}
@@ -197,6 +205,14 @@ func (b ForwardBatch) MarshalBinary() ([]byte, error) {
 
 func (b *ForwardBatch) UnmarshalBinary(data []byte) error {
 	br := binReader{b: data}
+	from, err := br.string()
+	if err != nil {
+		return fmt.Errorf("transport: decode ForwardBatch: %w", err)
+	}
+	seq, err := br.uint64()
+	if err != nil {
+		return fmt.Errorf("transport: decode ForwardBatch: %w", err)
+	}
 	count, err := br.count(forwardRequestMinSize)
 	if err != nil {
 		return fmt.Errorf("transport: decode ForwardBatch: %w", err)
@@ -212,6 +228,6 @@ func (b *ForwardBatch) UnmarshalBinary(data []byte) error {
 	if !br.done() {
 		return fmt.Errorf("transport: decode ForwardBatch: trailing data")
 	}
-	b.Requests = requests
+	b.From, b.Seq, b.Requests = from, seq, requests
 	return nil
 }

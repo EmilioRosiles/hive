@@ -2,7 +2,9 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/EmilioRosiles/hive/internal/transport"
 )
@@ -21,6 +23,8 @@ func (m *Cluster) handleFrame(msgType transport.MsgType, payload []byte) ([]byte
 		return m.handleRebalance(payload)
 	case transport.MsgLeave:
 		return nil, m.handleLeave(payload)
+	case transport.MsgPing:
+		return m.handlePing(payload), nil
 	default:
 		return nil, fmt.Errorf("handler: unknown message type %d", msgType)
 	}
@@ -46,29 +50,13 @@ func (m *Cluster) handleForward(payload []byte) ([]byte, error) {
 	return transport.Encode(transport.ForwardResponse{Results: results})
 }
 
-// handleForwardBatch decodes a batch of replicated ops and applies each one
-// in order. Every entry is applied even if an earlier one fails, so one bad
-// op doesn't stop the rest of the batch from reaching the replica; the first
-// error encountered (if any) is returned so the sender still learns of it.
+// handleForwardBatch decodes a batch of replicated ops and applies it through the replicator.
 func (m *Cluster) handleForwardBatch(payload []byte) error {
 	var batch transport.ForwardBatch
 	if err := transport.Decode(payload, &batch); err != nil {
 		return fmt.Errorf("handler: decode forward batch: %w", err)
 	}
-	var firstErr error
-	for _, req := range batch.Requests {
-		def, ok := opRegistry[req.Op]
-		if !ok {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("handler: unknown op %d", req.Op)
-			}
-			continue
-		}
-		if _, err := def.Exec(m, req.Key, req.Args, req.LockToken); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return m.replicator.apply(batch)
 }
 
 // dispatch routes op to the correct node(s) and executes it.
@@ -84,47 +72,78 @@ func (m *Cluster) dispatch(ctx context.Context, op transport.Op, key string, arg
 	}
 
 	nodes := m.responsibleNodes(key)
-	token := lockTokenFromContext(ctx)
+	req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: lockTokenFromContext(ctx)}
 
 	switch def.Scope {
 	case ScopeRead:
-		return m.execOrForward(ctx, def, op, key, args, nodes, token)
+		return m.execOrForward(ctx, def, req, &nodes)
 
 	case ScopeWrite:
-		result, err := m.execOrForward(ctx, def, op, key, args, nodes, token)
+		result, err := m.execOrForward(ctx, def, req, &nodes)
 		if err != nil {
 			return nil, err
 		}
-		req := transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token}
-		m.fanOutReplicas(def, req, nodes[1:])
+		if len(nodes) > 1 {
+			m.fanOutReplicas(def, req, nodes[1:])
+		}
 		return result, nil
 
 	case ScopeLocal:
-		return def.Exec(m, key, args, token)
+		return def.Exec(m, key, args, req.LockToken)
 	}
 
 	return nil, fmt.Errorf("cluster: unhandled scope for op %d", op)
 }
 
-// execOrForward runs op locally if this node is the primary owner for key (or
-// there is no other node), otherwise forwards it to the primary and returns
-// its response.
-func (m *Cluster) execOrForward(ctx context.Context, def opDef, op transport.Op, key string, args [][]byte, nodes []string, token uint32) ([][]byte, error) {
-	if len(nodes) == 0 || m.cfg.NodeID == nodes[0] {
-		return def.Exec(m, key, args, token)
+// execOrForward runs op on the key's primary, locally or by forwarding. It
+// retries every RoutingRetryInterval while the primary is Suspect, after a
+// failed read, or after an unsent write, re-resolving *nodes each time so the
+// caller replicates to the current owners, and gives up with ErrUnavailable
+// once RoutingTimeout runs out.
+func (m *Cluster) execOrForward(ctx context.Context, def opDef, req transport.ForwardRequest, nodes *[]string) ([][]byte, error) {
+	if n := *nodes; len(n) > 0 && n[0] == m.cfg.NodeID {
+		return def.Exec(m, req.Key, req.Args, req.LockToken)
 	}
-	ctx, cancel := context.WithTimeout(ctx, m.cfg.RoutingTimeout)
+	rctx, cancel := context.WithTimeout(ctx, m.cfg.RoutingTimeout)
 	defer cancel()
-	resp, err := m.sendForward(ctx, nodes[0], transport.ForwardRequest{Op: op, Key: key, Args: args, LockToken: token})
-	if err != nil {
-		return nil, err
+	for {
+		n := *nodes
+		if len(n) == 0 {
+			return nil, ErrUnavailable
+		}
+		if n[0] == m.cfg.NodeID {
+			return def.Exec(m, req.Key, req.Args, req.LockToken)
+		}
+		if status, _ := m.peerStatus(n[0]); status != NodeSuspect {
+			resp, err := m.sendForward(rctx, n[0], req)
+			switch {
+			case err == nil:
+				return resp.Results, nil
+			case errors.Is(err, transport.ErrRejected):
+				return nil, remoteErr(err)
+			case ctx.Err() != nil:
+				return nil, ctx.Err()
+			}
+			m.markSuspect(n[0])
+			if def.Scope == ScopeWrite && !errors.Is(err, transport.ErrUnsent) {
+				return nil, err
+			}
+		}
+		select {
+		case <-time.After(m.cfg.RoutingRetryInterval):
+		case <-rctx.Done():
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, ErrUnavailable
+		}
+		*nodes = m.responsibleNodes(req.Key)
 	}
-	return resp.Results, nil
 }
 
 // fanOutReplicas delivers req to each node in nodes. A node that is this node
 // executes the op synchronously (no network I/O involved); a remote node's
-// write is queued on its replicator, which applies queued writes to that
+// write is queued on the replicator, which applies queued writes to each
 // peer in order. nodes is typically nodes[1:] from the ring so the primary
 // (nodes[0]) is never duplicated here.
 func (m *Cluster) fanOutReplicas(def opDef, req transport.ForwardRequest, nodes []string) {
@@ -133,9 +152,7 @@ func (m *Cluster) fanOutReplicas(def opDef, req transport.ForwardRequest, nodes 
 			def.Exec(m, req.Key, req.Args, req.LockToken)
 			continue
 		}
-		if rep, ok := m.getReplicator(nodeID); ok {
-			rep.enqueue(req)
-		}
+		m.replicator.enqueue(nodeID, req)
 	}
 }
 
@@ -143,7 +160,7 @@ func (m *Cluster) fanOutReplicas(def opDef, req transport.ForwardRequest, nodes 
 func (m *Cluster) sendForward(ctx context.Context, nodeID string, req transport.ForwardRequest) (transport.ForwardResponse, error) {
 	client, ok := m.getClient(nodeID)
 	if !ok {
-		return transport.ForwardResponse{}, fmt.Errorf("cluster: no client for node %s", nodeID)
+		return transport.ForwardResponse{}, fmt.Errorf("cluster: no client for node %s: %w", nodeID, transport.ErrUnsent)
 	}
 	framePayload, err := transport.Encode(req)
 	if err != nil {
@@ -165,12 +182,12 @@ func (m *Cluster) sendForward(ctx context.Context, nodeID string, req transport.
 // sendForwardBatch encodes and sends a batch of queued replication writes to
 // nodeID. Replication never reads the results of a write, so unlike
 // sendForward there is no response payload to decode — only success/failure.
-func (m *Cluster) sendForwardBatch(ctx context.Context, nodeID string, batch []transport.ForwardRequest) error {
+func (m *Cluster) sendForwardBatch(ctx context.Context, nodeID string, batch transport.ForwardBatch) error {
 	client, ok := m.getClient(nodeID)
 	if !ok {
 		return fmt.Errorf("cluster: no client for node %s", nodeID)
 	}
-	framePayload, err := transport.Encode(transport.ForwardBatch{Requests: batch})
+	framePayload, err := transport.Encode(batch)
 	if err != nil {
 		return err
 	}

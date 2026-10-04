@@ -22,6 +22,16 @@ func newClusteredTestNode(t *testing.T, seeds []string, rf int) *Cluster {
 // newClusteredTestNodeWithPool mirrors newClusteredTestNode with an explicit ConnPoolSize.
 func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int) *Cluster {
 	t.Helper()
+	m, err := NewCluster(clusteredTestConfig(t, seeds, rf, poolSize))
+	if err != nil {
+		t.Fatalf("NewCluster: %v", err)
+	}
+	return m
+}
+
+// clusteredTestConfig returns a fast-timing clustered config on a free loopback port.
+func clusteredTestConfig(t *testing.T, seeds []string, rf, poolSize int) Config {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
@@ -29,34 +39,37 @@ func newClusteredTestNodeWithPool(t *testing.T, seeds []string, rf, poolSize int
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	m, err := NewCluster(Config{
+	return Config{
 		NodeID:               fmt.Sprintf("node-%d", port),
 		BindAddr:             "127.0.0.1",
 		BindPort:             port,
+		AdvertiseAddr:        fmt.Sprintf("127.0.0.1:%d", port),
 		Seeds:                seeds,
 		ReplicationFactor:    rf,
 		MemLimit:             256 << 20, // realistic capacity/vnode count; 0 now means "owns nothing"
 		RoutingTimeout:       time.Second,
+		RoutingRetryInterval: 50 * time.Millisecond,
 		ConnPoolSize:         poolSize,
 		GossipInterval:       100 * time.Millisecond,
 		GossipFanout:         3,
 		GossipTimeout:        300 * time.Millisecond,
+		ProbeTimeout:         300 * time.Millisecond,
+		ProbeHelpers:         3,
+		ProbeInterval:        100 * time.Millisecond,
 		RebalanceDebounce:    50 * time.Millisecond,
 		RebalanceBatchSize:   128,
+		RebalanceTimeout:     time.Second,
 		ReplicationQueueSize: 64,
 		ReplicationBatchSize: 16,
-		CleanupInterval:      time.Second,
+		CleanupInterval:      100 * time.Millisecond,
+		DeadRetention:        time.Second,
 		Clustered:            true,
 		Logger:               slog.Default(),
-	})
-	if err != nil {
-		t.Fatalf("NewCluster: %v", err)
 	}
-	return m
 }
 
 func clusteredAddr(m *Cluster) string {
-	return fmt.Sprintf("%s:%d", m.cfg.BindAddr, m.cfg.BindPort)
+	return m.cfg.AdvertiseAddr
 }
 
 // killUngracefully simulates a hard process crash: it stops m's background
@@ -70,6 +83,11 @@ func killUngracefully(m *Cluster) {
 		if m.server != nil {
 			m.server.Close()
 		}
+		m.mu.Lock()
+		for _, c := range m.clients {
+			c.Close()
+		}
+		m.mu.Unlock()
 	})
 }
 
@@ -109,7 +127,7 @@ func TestCluster_UngracefulFailure_DetectedAndDataSurvives(t *testing.T) {
 	killUngracefully(n3)
 
 	// n1 and n2 must detect this via the real heartbeat-timeout path
-	// (Cluster.heartbeat -> client.Send error -> markDead).
+	// (Cluster.heartbeat -> client.Send error -> suspect -> probe -> markDead).
 	waitForCond(t, 3*time.Second, "surviving nodes detect the crash", func() bool {
 		s1, ok1 := n1.peerStatus(n3.cfg.NodeID)
 		s2, ok2 := n2.peerStatus(n3.cfg.NodeID)
@@ -123,4 +141,33 @@ func TestCluster_UngracefulFailure_DetectedAndDataSurvives(t *testing.T) {
 		_, err2 := n2.Exec(t.Context(), transport.OpValueGet, key)
 		return err1 == nil || err2 == nil
 	})
+}
+
+// TestCluster_FalseDeath_IsRefuted checks that a node wrongly declared Dead
+// refutes the rumour once it hears it, and that other nodes verify the rumour
+// with their own probe instead of dropping the node.
+func TestCluster_FalseDeath_IsRefuted(t *testing.T) {
+	n1 := newClusteredTestNode(t, nil, 2)
+	n2 := newClusteredTestNode(t, []string{clusteredAddr(n1)}, 2)
+	n3 := newClusteredTestNode(t, []string{clusteredAddr(n1)}, 2)
+	defer n1.Shutdown()
+	defer n2.Shutdown()
+	defer n3.Shutdown()
+
+	waitForCond(t, 2*time.Second, "cluster formed", func() bool {
+		return len(n1.Peers()) == 2 && len(n2.Peers()) == 2 && len(n3.Peers()) == 2
+	})
+
+	clientN3, _ := n3.getClient(n2.cfg.NodeID)
+
+	n1.markDead(n2.cfg.NodeID)
+
+	waitForCond(t, 3*time.Second, "n2 revived on n1 and n3", func() bool {
+		s1, _ := n1.peerStatus(n2.cfg.NodeID)
+		s3, _ := n3.peerStatus(n2.cfg.NodeID)
+		return s1 == NodeAlive && s3 == NodeAlive
+	})
+	if c, _ := n3.getClient(n2.cfg.NodeID); c != clientN3 {
+		t.Error("n3 dropped n2 on n1's rumour instead of verifying it with its own probe")
+	}
 }

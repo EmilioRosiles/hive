@@ -44,14 +44,14 @@ func (m *Cluster) startGossip() {
 		case <-time.After(Jitter(m.cfg.GossipInterval, 0.25)):
 		}
 
-		targets := m.randomAlivePeers(m.cfg.GossipFanout)
+		targets := m.randomPeers(m.cfg.GossipFanout, "")
 		m.heartbeat(targets...)
 		go m.rebalancer.schedule()
 	}
 }
 
 // heartbeat sends this node's view of the cluster to each target peer.
-// Peers that fail to respond are removed from the cluster.
+// Peers that fail to respond are suspected and probed.
 func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 	if len(targets) == 0 {
 		return
@@ -76,7 +76,7 @@ func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 		cancel()
 		if err != nil {
 			m.logger.Warn("gossip: heartbeat failed", "node", p.NodeID, "err", err)
-			m.markDead(p.NodeID)
+			m.markSuspect(p.NodeID)
 			continue
 		}
 
@@ -95,7 +95,8 @@ func (m *Cluster) heartbeat(targets ...*PeerInfo) {
 // bootstrap sends a heartbeat to addr and merges the response into our cluster
 // view. This is called once per seed at startup so the ring is populated with
 // real NodeIDs before the gossip loop begins. Unreachable seeds are skipped —
-// at least one must succeed for the node to join the cluster.
+// at least one must succeed for the node to join the cluster. The bootstrap
+// client is kept as the seed's pooled client, so its connection stays in use.
 // If the seed rejects the join (e.g. replication factor mismatch), the node halts.
 func (m *Cluster) bootstrap(addr string) {
 	payload, err := transport.Encode(m.buildHeartbeatRequest())
@@ -105,40 +106,52 @@ func (m *Cluster) bootstrap(addr string) {
 	client := m.newClient(addr)
 	resp, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgHeartbeat, Payload: payload})
 	if err != nil {
-		var rejected *transport.ErrRejected
-		if errors.As(err, &rejected) {
-			m.logger.Error("hive: cluster rejected join", "addr", addr, "reason", rejected.Error())
+		client.Close()
+		if errors.Is(err, transport.ErrRejected) {
+			m.logger.Error("hive: cluster rejected join", "addr", addr, "reason", err)
 			os.Exit(1)
 		}
 		m.logger.Warn("bootstrap: seed unreachable", "addr", addr, "err", err)
 		return
 	}
 	var hbResp transport.HeartbeatResponse
-	if err := transport.Decode(resp.Payload, &hbResp); err != nil {
+	if err := transport.Decode(resp.Payload, &hbResp); err != nil || len(hbResp.Peers) == 0 {
+		client.Close()
 		m.logger.Warn("bootstrap: decode failed", "addr", addr, "err", err)
 		return
 	}
+	seed := hbResp.Peers[0].NodeID // the responder lists itself first
+	_, known := m.getPeer(seed)
 	if err := m.mergeState(hbResp.Peers); err != nil {
+		client.Close()
 		m.logger.Error("hive: cluster rejected join", "addr", addr, "reason", err)
 		os.Exit(1)
 	}
+
+	m.mu.Lock()
+	if fresh, ok := m.clients[seed]; ok && !known {
+		m.clients[seed], client = client, fresh
+	}
+	m.mu.Unlock()
+	client.Close()
 	m.logger.Info("bootstrap: joined via seed", "addr", addr, "peers", len(hbResp.Peers))
 }
 
-// mergeState reconciles a peer's view of the cluster with our own.
-// Returns the first error encountered, e.g. a replication factor mismatch.
-// Incarnation is the authoritative ordering key. A remote state update is
-// applied only when its Incarnation greater than what we hold locally.
+// mergeState reconciles a peer's view of the cluster with our own, applying
+// each entry that takes precedence (see applyIncarnation) and refuting Dead
+// rumours about ourselves. A Dead rumour about a peer is verified with our own
+// probe before acting on it. Returns the first error, e.g. a replication factor mismatch.
 func (m *Cluster) mergeState(remote []transport.PeerState) error {
 	for _, rs := range remote {
 		if rs.NodeID == m.cfg.NodeID {
-			continue // our own state is authoritative; skip
+			m.refute(rs)
+			continue
 		}
 
 		local, exists := m.getPeer(rs.NodeID)
 
 		if !exists {
-			if NodeStatus(rs.Status) == NodeAlive {
+			if NodeStatus(rs.Status) != NodeDead {
 				if err := m.addPeer(rs); err != nil {
 					return err
 				}
@@ -146,12 +159,10 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 			continue
 		}
 
-		if localStatus, ok := m.applyIncarnation(local, rs.Incarnation); ok {
+		if m.applyIncarnation(local, rs) {
 			switch NodeStatus(rs.Status) {
 			case NodeDead:
-				if localStatus == NodeAlive {
-					m.markDead(rs.NodeID)
-				}
+				m.markSuspect(rs.NodeID)
 			case NodeAlive:
 				if err := m.addPeer(rs); err != nil {
 					return err
@@ -162,26 +173,44 @@ func (m *Cluster) mergeState(remote []transport.PeerState) error {
 	return nil
 }
 
-// applyIncarnation atomically checks whether incarnation is newer than
-// local's current value and, if so, updates it. local is a live pointer into
-// m.peers shared with concurrent goroutines, so the check and the write must
-// happen under the same lock.
-func (m *Cluster) applyIncarnation(local *PeerInfo, incarnation uint64) (status NodeStatus, applied bool) {
+// applyIncarnation reports whether rs takes precedence over local and, if so,
+// records its incarnation: a higher incarnation wins, and at equal incarnation
+// the worse status wins (Dead > Suspect > Alive). MemUsed is refreshed from any
+// entry that isn't older.
+func (m *Cluster) applyIncarnation(local *PeerInfo, rs transport.PeerState) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if incarnation <= local.Incarnation {
-		return 0, false
+	if rs.Incarnation < local.Incarnation {
+		return false
 	}
-	local.Incarnation = incarnation
-	return NodeStatus(local.Status), true
+	local.MemUsed = rs.MemUsed
+	if rs.Incarnation == local.Incarnation && NodeStatus(rs.Status) <= local.Status {
+		return false
+	}
+	local.Incarnation = rs.Incarnation
+	return true
+}
+
+// refute bumps our incarnation past a Dead rumour about us, so our next
+// heartbeat overrides it. A node that announced its leave doesn't refute.
+func (m *Cluster) refute(rs transport.PeerState) {
+	if NodeStatus(rs.Status) != NodeDead || rs.Incarnation == math.MaxUint64 {
+		return
+	}
+	for {
+		cur := m.incarnation.Load()
+		if rs.Incarnation < cur || cur == math.MaxUint64 {
+			return
+		}
+		if m.incarnation.CompareAndSwap(cur, rs.Incarnation+1) {
+			m.logger.Warn("gossip: refuting dead rumour about this node", "incarnation", rs.Incarnation+1)
+			return
+		}
+	}
 }
 
 // buildHeartbeatRequest assembles the current node's peer list for gossip.
-// Incarnation is bumped on every call so each outgoing heartbeat carries a
-// strictly higher value than the previous one, ensuring our alive state beats
-// any stale dead rumour without needing an explicit refutation step.
 func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
-	m.incarnation.Add(1)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -190,7 +219,7 @@ func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 	// Include self — always alive from our own perspective.
 	peers = append(peers, transport.PeerState{
 		NodeID:            m.cfg.NodeID,
-		Addr:              fmt.Sprintf("%s:%d", m.cfg.BindAddr, m.cfg.BindPort),
+		Addr:              m.cfg.AdvertiseAddr,
 		Status:            uint8(NodeAlive),
 		Incarnation:       m.incarnation.Load(),
 		ReplicationFactor: m.cfg.ReplicationFactor,
@@ -213,7 +242,8 @@ func (m *Cluster) buildHeartbeatRequest() transport.HeartbeatRequest {
 	return transport.HeartbeatRequest{Peers: peers}
 }
 
-// announceLeave notifies all known peers that this node is departing.
+// announceLeave notifies every peer we hold a client for (all but the Dead
+// ones) that this node is departing.
 func (m *Cluster) announceLeave() {
 	m.incarnation.Store(math.MaxUint64)
 	payload, err := transport.Encode(transport.LeaveRequest{NodeID: m.cfg.NodeID})
@@ -224,13 +254,12 @@ func (m *Cluster) announceLeave() {
 
 	m.mu.RLock()
 	var wg sync.WaitGroup
-	for _, p := range m.peers {
+	for _, c := range m.clients {
 		wg.Add(1)
-		go func(addr string) {
+		go func() {
 			defer wg.Done()
-			c := m.newClient(addr)
 			c.Send(context.Background(), frame)
-		}(p.Addr)
+		}()
 	}
 	m.mu.RUnlock()
 

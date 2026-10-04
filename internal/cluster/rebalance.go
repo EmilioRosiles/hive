@@ -128,22 +128,34 @@ func (rm *rebalancer) run() {
 		}
 	})
 
+	undelivered := make(map[string]struct{})
 	for nodeID, entries := range batchesByNode {
-		m.sendRebalanceBatch(nodeID, entries)
+		if err := m.sendRebalanceBatch(nodeID, entries); err != nil {
+			m.logger.Warn("rebalance: migration failed, will retry", "node", nodeID, "err", err)
+			for _, re := range entries {
+				undelivered[re.Key] = struct{}{}
+			}
+		}
 	}
 
 	for _, key := range deleteList {
-		m.store.Del(key)
+		if _, ok := undelivered[key]; !ok {
+			m.store.Del(key)
+		}
+	}
+	if len(undelivered) > 0 {
+		rm.lastRing = oldRing
 	}
 
 	m.logger.Debug("rebalance: finished")
 }
 
-func (m *Cluster) sendRebalanceBatch(nodeID string, entries []transport.RebalanceEntry) {
+// sendRebalanceBatch migrates entries to nodeID in RebalanceBatchSize frames,
+// each bounded by RebalanceTimeout, stopping at the first failed send.
+func (m *Cluster) sendRebalanceBatch(nodeID string, entries []transport.RebalanceEntry) error {
 	client, ok := m.getClient(nodeID)
 	if !ok {
-		m.logger.Warn("rebalance: no client", "node", nodeID)
-		return
+		return fmt.Errorf("rebalance: no client for node %s", nodeID)
 	}
 
 	for i := 0; i < len(entries); i += m.cfg.RebalanceBatchSize {
@@ -154,13 +166,16 @@ func (m *Cluster) sendRebalanceBatch(nodeID string, entries []transport.Rebalanc
 			m.logger.Warn("rebalance: encode batch failed", "node", nodeID, "err", err)
 			continue
 		}
-		if _, err := client.Send(context.Background(), transport.Frame{Type: transport.MsgRebalance, Payload: payload}); err != nil {
-			m.logger.Warn("rebalance: send failed", "node", nodeID, "err", err)
-			m.markDead(nodeID)
-			return
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RebalanceTimeout)
+		_, err = client.Send(ctx, transport.Frame{Type: transport.MsgRebalance, Payload: payload})
+		cancel()
+		if err != nil {
+			m.markSuspect(nodeID)
+			return err
 		}
 	}
 	m.logger.Info("rebalance: migration complete", "keys", len(entries), "node", nodeID)
+	return nil
 }
 
 // migrationTargets returns node IDs that are in newOwners but not in oldOwners.

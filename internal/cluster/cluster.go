@@ -3,6 +3,7 @@
 package cluster
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -20,8 +21,9 @@ import (
 type NodeStatus uint8
 
 const (
-	NodeAlive NodeStatus = 0
-	NodeDead  NodeStatus = 1
+	NodeAlive   NodeStatus = 0
+	NodeSuspect NodeStatus = 1
+	NodeDead    NodeStatus = 2
 )
 
 // Config holds all configuration for the cluster manager.
@@ -29,19 +31,26 @@ type Config struct {
 	NodeID               string
 	BindAddr             string
 	BindPort             int
+	AdvertiseAddr        string
 	Seeds                []string
 	RoutingTimeout       time.Duration
+	RoutingRetryInterval time.Duration
 	ConnPoolSize         int
 	ReplicationFactor    int
 	MemLimit             uint64
 	GossipInterval       time.Duration
 	GossipFanout         int
 	GossipTimeout        time.Duration
+	ProbeTimeout         time.Duration
+	ProbeHelpers         int
+	ProbeInterval        time.Duration
 	RebalanceDebounce    time.Duration
 	RebalanceBatchSize   int
+	RebalanceTimeout     time.Duration
 	ReplicationQueueSize int
 	ReplicationBatchSize int
 	CleanupInterval      time.Duration
+	DeadRetention        time.Duration
 	Clustered            bool
 	TLSConfig            *tls.Config
 	Logger               *slog.Logger
@@ -57,6 +66,7 @@ type PeerInfo struct {
 	ReplicationFactor int
 	MemLimit          uint64
 	MemUsed           uint64
+	deadAt            time.Time
 }
 
 // Cluster owns the cluster state for this node.
@@ -67,7 +77,7 @@ type Cluster struct {
 	store       *store.DataStore
 	peers       map[string]*PeerInfo
 	clients     map[string]*transport.Client
-	replicators map[string]*replicator
+	replicator  *replicator
 	rebalancer  *rebalancer
 	server      *transport.Server
 	stopCh      chan struct{}
@@ -84,23 +94,23 @@ func NewCluster(cfg Config) (*Cluster, error) {
 	vNodeCount := computeVNodes(cfg.MemLimit)
 
 	m := &Cluster{
-		cfg:         cfg,
-		ring:        r,
-		store:       ds,
-		peers:       make(map[string]*PeerInfo),
-		clients:     make(map[string]*transport.Client),
-		replicators: make(map[string]*replicator),
-		stopCh:      make(chan struct{}),
-		logger:      cfg.Logger,
+		cfg:     cfg,
+		ring:    r,
+		store:   ds,
+		peers:   make(map[string]*PeerInfo),
+		clients: make(map[string]*transport.Client),
+		stopCh:  make(chan struct{}),
+		logger:  cfg.Logger,
 	}
 	m.incarnation.Store(uint64(time.Now().UnixNano()))
 	m.ring.Add(cfg.NodeID, vNodeCount)
 	m.rebalancer = newRebalancer(cfg.RebalanceDebounce, m)
+	m.replicator = newReplicator(m)
 	go m.startJanitor()
 
 	if cfg.Clustered {
 		addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.BindPort)
-		srv, err := transport.NewServer(addr, m.handleFrame, cfg.TLSConfig, cfg.Logger)
+		srv, err := transport.NewServer(addr, m.handleFrame, m.getClient, cfg.TLSConfig, cfg.Logger)
 		if err != nil {
 			return nil, err
 		}
@@ -129,9 +139,7 @@ func (m *Cluster) Shutdown() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		for _, rep := range m.replicators {
-			rep.stop()
-		}
+		m.replicator.stop()
 
 		for _, c := range m.clients {
 			c.Close()
@@ -176,12 +184,11 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 
 	if p, ok := m.peers[ps.NodeID]; ok {
 		p.MemUsed = ps.MemUsed
-		if p.Status != NodeAlive {
+		if p.Status == NodeDead {
 			p.Status = NodeAlive
 			p.Incarnation = ps.Incarnation
 			m.ring.Add(ps.NodeID, vNodeCount)
 			m.clients[ps.NodeID] = m.newClient(ps.Addr)
-			m.replicators[ps.NodeID] = newReplicator(ps.NodeID, m)
 			go m.rebalancer.schedule()
 		}
 		return nil
@@ -198,14 +205,40 @@ func (m *Cluster) addPeer(ps transport.PeerState) error {
 	}
 	m.ring.Add(ps.NodeID, vNodeCount)
 	m.clients[ps.NodeID] = m.newClient(ps.Addr)
-	m.replicators[ps.NodeID] = newReplicator(ps.NodeID, m)
 	go m.rebalancer.schedule()
 
 	m.logger.Info("cluster: added peer", "nodeID", ps.NodeID, "addr", ps.Addr)
 	return nil
 }
 
-// markDead promotes a peer to the Dead state.
+// markSuspect marks an Alive peer Suspect and probes it in the background, leaving
+// its ring position and client in place. Only the probe ends the
+// suspicion, by marking the peer Alive or Dead.
+func (m *Cluster) markSuspect(nodeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	p, ok := m.peers[nodeID]
+	if !ok || p.Status != NodeAlive {
+		return
+	}
+	p.Status = NodeSuspect
+	m.logger.Warn("cluster: peer suspected", "node", nodeID)
+	go m.probe(nodeID)
+}
+
+// markAlive moves a Suspect peer back to Alive.
+func (m *Cluster) markAlive(nodeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p, ok := m.peers[nodeID]; ok && p.Status == NodeSuspect {
+		p.Status = NodeAlive
+		m.logger.Info("cluster: suspect peer is alive", "node", nodeID)
+	}
+}
+
+// markDead promotes a peer to the Dead state. Its client is closed in the
+// background, since Close can wait on an in-flight dial.
 func (m *Cluster) markDead(nodeID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -215,18 +248,119 @@ func (m *Cluster) markDead(nodeID string) {
 		return
 	}
 	p.Status = NodeDead
+	p.deadAt = time.Now()
 	m.ring.Remove(nodeID)
-	delete(m.clients, nodeID)
-	if rep, ok := m.replicators[nodeID]; ok {
-		rep.stop()
-		delete(m.replicators, nodeID)
+	if c, ok := m.clients[nodeID]; ok {
+		go c.Close()
+		delete(m.clients, nodeID)
 	}
 	go m.rebalancer.schedule()
 	m.logger.Warn("cluster: peer marked dead", "node", nodeID)
 }
 
-// startJanitor runs the cleanup loop until the node shuts down.
-// On each tick it removes expired store entries and evicts dead-peer tombstones.
+// probeResult is the outcome of asking a helper to ping a peer.
+type probeResult uint8
+
+const (
+	probeNoAnswer probeResult = iota
+	probeNack
+	probeAck
+)
+
+// Ping hops: the first payload byte of a MsgPing, followed by the target node ID.
+const (
+	pingDirect byte = iota
+	pingRelay
+)
+
+// probe resolves a Suspect peer with a direct ping, then indirect pings through
+// up to ProbeHelpers helpers. It retries every ProbeInterval while no helper answers.
+func (m *Cluster) probe(nodeID string) {
+	for {
+		if status, _ := m.peerStatus(nodeID); status != NodeSuspect {
+			return
+		}
+		if m.ping(nodeID, nodeID) == probeAck {
+			m.markAlive(nodeID)
+			return
+		}
+		helpers := m.randomPeers(m.cfg.ProbeHelpers, nodeID)
+		if len(helpers) == 0 {
+			m.markDead(nodeID)
+			return
+		}
+		results := make(chan probeResult, len(helpers))
+		for _, h := range helpers {
+			go func() { results <- m.ping(h.NodeID, nodeID) }()
+		}
+		result := probeNoAnswer
+		for range helpers {
+			result = max(result, <-results)
+			if result == probeAck {
+				break
+			}
+		}
+		switch result {
+		case probeAck:
+			m.logger.Warn("cluster: peer reachable only through helpers", "node", nodeID)
+			m.markAlive(nodeID)
+			return
+		case probeNack:
+			m.markDead(nodeID)
+			return
+		}
+		m.logger.Warn("cluster: no helper answered, retrying probe", "node", nodeID)
+		select {
+		case <-time.After(m.cfg.ProbeInterval):
+		case <-m.stopCh:
+			return
+		}
+	}
+}
+
+// ping asks via whether target is up; via == target is a direct ping, waiting
+// ProbeTimeout. A relay ping waits twice that, so the helper's own ping fits.
+func (m *Cluster) ping(via, target string) probeResult {
+	client, ok := m.getClient(via)
+	if !ok {
+		return probeNoAnswer
+	}
+	hop, timeout := pingDirect, m.cfg.ProbeTimeout
+	if via != target {
+		hop, timeout = pingRelay, 2*m.cfg.ProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	resp, err := client.Send(ctx, transport.Frame{Type: transport.MsgPing, Payload: append([]byte{hop}, target...)})
+	if err != nil {
+		return probeNoAnswer
+	}
+	if len(resp.Payload) == 1 && probeResult(resp.Payload[0]) == probeAck {
+		return probeAck
+	}
+	return probeNack
+}
+
+// handlePing answers a MsgPing with ack or nack. A direct ping is acked only if
+// we are its target; a relay ping is answered by pinging the target directly.
+func (m *Cluster) handlePing(payload []byte) []byte {
+	if len(payload) < 2 {
+		return []byte{byte(probeNack)}
+	}
+	target := string(payload[1:])
+	ack := target == m.cfg.NodeID
+	if payload[0] == pingRelay {
+		ack = m.ping(target, target) == probeAck
+	}
+	if !ack {
+		return []byte{byte(probeNack)}
+	}
+	return []byte{byte(probeAck)}
+}
+
+// startJanitor runs the cleanup loop until the node shuts down. On each tick
+// it removes expired store entries, evicts dead-peer tombstones, and closes
+// peer connections left idle since the previous tick.
 func (m *Cluster) startJanitor() {
 	ticker := time.NewTicker(m.cfg.CleanupInterval)
 	defer ticker.Stop()
@@ -235,18 +369,35 @@ func (m *Cluster) startJanitor() {
 		case <-ticker.C:
 			m.store.DeleteExpired()
 			m.evictDeadPeers()
+			m.reapConns()
 		case <-m.stopCh:
 			return
 		}
 	}
 }
 
+// reapConns closes idle connections to every peer, keeping one per peer.
+func (m *Cluster) reapConns() {
+	m.mu.RLock()
+	clients := make([]*transport.Client, 0, len(m.clients))
+	for _, c := range m.clients {
+		clients = append(clients, c)
+	}
+	m.mu.RUnlock()
+	for _, c := range clients {
+		c.Reap()
+	}
+}
+
+// evictDeadPeers forgets peers, and their replication dedup state, once they
+// have been Dead for at least DeadRetention.
 func (m *Cluster) evictDeadPeers() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for nodeID, p := range m.peers {
-		if p.Status == NodeDead {
+		if p.Status == NodeDead && time.Since(p.deadAt) >= m.cfg.DeadRetention {
 			delete(m.peers, nodeID)
+			m.replicator.forget(nodeID)
 			m.logger.Info("cluster: evicted dead peer tombstone", "node", nodeID)
 		}
 	}
@@ -277,7 +428,7 @@ func (m *Cluster) peerStatus(nodeID string) (NodeStatus, bool) {
 // newClient builds a transport client for addr, applying this node's TLS
 // config (nil means plaintext) and connection pool size.
 func (m *Cluster) newClient(addr string) *transport.Client {
-	return transport.NewClient(addr, m.cfg.TLSConfig, m.cfg.ConnPoolSize, m.logger)
+	return transport.NewClient(addr, m.cfg.NodeID, m.handleFrame, m.cfg.TLSConfig, m.cfg.ConnPoolSize, m.logger)
 }
 
 // getClient returns the transport client for a peer node ID.
@@ -288,22 +439,15 @@ func (m *Cluster) getClient(nodeID string) (*transport.Client, bool) {
 	return c, ok
 }
 
-// getReplicator returns the replication queue worker for a peer node ID.
-func (m *Cluster) getReplicator(nodeID string) (*replicator, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	r, ok := m.replicators[nodeID]
-	return r, ok
-}
-
-// randomAlivePeers returns up to n randomly selected alive peers.
-func (m *Cluster) randomAlivePeers(n int) []*PeerInfo {
+// randomPeers returns up to n random peers that aren't Dead, other than exclude.
+// A Suspect peer is still serving, so it counts.
+func (m *Cluster) randomPeers(n int, exclude string) []*PeerInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	alive := make([]*PeerInfo, 0, len(m.peers))
 	for _, p := range m.peers {
-		if p.Status == NodeAlive {
+		if p.Status != NodeDead && p.NodeID != exclude {
 			alive = append(alive, p)
 		}
 	}

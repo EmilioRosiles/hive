@@ -29,6 +29,15 @@ func TestFrame_RoundTrip_Payload(t *testing.T) {
 	}
 }
 
+func TestFrame_RoundTrip_Resp(t *testing.T) {
+	if got := roundTripFrame(t, Frame{ID: 1, Type: MsgPing, Resp: true}); !got.Resp {
+		t.Error("Resp flag lost in round trip")
+	}
+	if got := roundTripFrame(t, Frame{ID: 1, Type: MsgPing, Err: "x"}); got.Resp {
+		t.Error("Resp set on a request frame")
+	}
+}
+
 func TestFrame_RoundTrip_EmptyPayload(t *testing.T) {
 	f := Frame{ID: 1, Type: MsgHeartbeat}
 	got := roundTripFrame(t, f)

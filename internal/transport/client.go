@@ -14,101 +14,183 @@ import (
 
 const defaultTimeout = 3 * time.Second
 
-// Client maintains a small pool of persistent connections to a peer, round-
-// robin selected so concurrent sends don't serialize on one connection.
+// ErrUnsent marks a Send failure where the frame was never written, so the
+// request is safe to retry.
+var ErrUnsent = errors.New("transport: frame not sent")
+
+var (
+	errClientClosed = errors.New("transport: client closed")
+	errPoolFull     = errors.New("transport: pool full")
+)
+
+// Client keeps up to poolSize persistent connections to a peer, sending on the
+// least busy one and growing the pool only while every connection is busy. Its
+// connections also serve the peer's requests with handler.
 type Client struct {
 	addr      string
+	localID   string
+	handler   Handler
 	timeout   time.Duration
 	tlsConfig *tls.Config
 	mu        sync.Mutex
-	muxes     []atomic.Pointer[mux]
-	next      atomic.Uint32
+	closed    bool
+	conns     []atomic.Pointer[conn]
+	growing   atomic.Bool
 	logger    *slog.Logger
 }
 
-// NewClient creates a client for addr with a pool of poolSize connections
-// (minimum 1). If tlsConfig is non-nil, connections are dialed over TLS.
-func NewClient(addr string, tlsConfig *tls.Config, poolSize int, logger *slog.Logger) *Client {
-	return &Client{addr: addr, timeout: defaultTimeout, tlsConfig: tlsConfig, muxes: make([]atomic.Pointer[mux], max(1, poolSize)), logger: logger}
+// NewClient creates a client for addr with up to poolSize connections
+// (minimum 1). A non-empty localID is sent as MsgHello on every dial so the
+// peer can reuse the connection. If tlsConfig is non-nil, connections are dialed over TLS.
+func NewClient(addr, localID string, handler Handler, tlsConfig *tls.Config, poolSize int, logger *slog.Logger) *Client {
+	return &Client{addr: addr, localID: localID, handler: handler, timeout: defaultTimeout, tlsConfig: tlsConfig, conns: make([]atomic.Pointer[conn], max(1, poolSize)), logger: logger}
 }
 
-// Send delivers frame to the peer and returns the response.
+// Send delivers frame to the peer and returns the response. A frame that never
+// left because its pooled connection had died is retried at once on another
+// connection; a failed dial is not retried, callers decide. Failures wrap
+// ErrUnsent (not sent), ErrMuxClosed or a context error (outcome unknown), or
+// ErrRejected (peer answered with an error).
 func (c *Client) Send(ctx context.Context, frame Frame) (Frame, error) {
-	slot := int(c.next.Add(1)-1) % len(c.muxes)
-	for attempt := range 3 {
-		m, err := c.getMux(slot)
+	var err error
+	for range 3 {
+		var cn *conn
+		cn, err = c.pick()
 		if err != nil {
-			if attempt < 2 {
-				if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
-					return Frame{}, serr
-				}
-				continue
-			}
-			return Frame{}, fmt.Errorf("transport: connect to %s: %w", c.addr, err)
+			return Frame{}, fmt.Errorf("transport: connect to %s: %w: %w", c.addr, ErrUnsent, err)
 		}
-		resp, err := m.send(ctx, frame)
-		if err == nil {
-			return resp, nil
+		var resp Frame
+		resp, err = cn.send(ctx, frame)
+		if !errors.Is(err, ErrUnsent) {
+			return resp, err
 		}
-		if errors.Is(err, errMuxClosed) && attempt < 2 {
-			c.invalidate(slot, m)
-			if serr := sleepCtx(ctx, 100*time.Millisecond); serr != nil {
-				return Frame{}, serr
-			}
+	}
+	return Frame{}, err
+}
+
+// pick returns the least busy live connection. When every connection is busy
+// it grows the pool in the background; with none live it dials one.
+func (c *Client) pick() (*conn, error) {
+	var best *conn
+	full := true
+	for i := range c.conns {
+		cn := c.conns[i].Load()
+		if cn == nil || cn.closed() {
+			full = false
 			continue
 		}
-		return Frame{}, err
+		if best == nil || cn.inflight.Load() < best.inflight.Load() {
+			best = cn
+		}
 	}
-	return Frame{}, fmt.Errorf("transport: send to %s failed", c.addr)
+	if best == nil {
+		return c.grow(true)
+	}
+	if !full && best.inflight.Load() > 0 && c.growing.CompareAndSwap(false, true) {
+		go func() {
+			c.grow(false)
+			c.growing.Store(false)
+		}()
+	}
+	return best, nil
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	select {
-	case <-time.After(d):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// getMux returns the live mux for slot, dialing a new connection if needed.
-func (c *Client) getMux(slot int) (*mux, error) {
-	if m := c.muxes[slot].Load(); m != nil && !m.closed() {
-		return m, nil
-	}
-
+// grow dials a connection into the first empty slot. With reuse, a live
+// connection another caller just added is returned instead. It fails with
+// errClientClosed once Close has been called.
+func (c *Client) grow(reuse bool) (*conn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if m := c.muxes[slot].Load(); m != nil && !m.closed() {
-		return m, nil
+	if c.closed {
+		return nil, errClientClosed
+	}
+	slot := -1
+	for i := range c.conns {
+		if cn := c.conns[i].Load(); cn != nil && !cn.closed() {
+			if reuse {
+				return cn, nil
+			}
+		} else if slot < 0 {
+			slot = i
+		}
+	}
+	if slot < 0 {
+		return nil, errPoolFull
 	}
 
-	var conn net.Conn
+	var nc net.Conn
 	var err error
 	if c.tlsConfig != nil {
-		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: c.timeout}, "tcp", c.addr, c.tlsConfig)
+		nc, err = tls.DialWithDialer(&net.Dialer{Timeout: c.timeout}, "tcp", c.addr, c.tlsConfig)
 	} else {
-		conn, err = net.DialTimeout("tcp", c.addr, c.timeout)
+		nc, err = net.DialTimeout("tcp", c.addr, c.timeout)
 	}
 	if err != nil {
 		return nil, err
 	}
-	m := newMux(conn, c.logger)
-	c.muxes[slot].Store(m)
-	return m, nil
+	cn := newConn(nc, c.handler, c.logger)
+	go cn.readLoop()
+	if c.localID != "" {
+		if err := cn.w.write(Frame{Type: MsgHello, Payload: []byte(c.localID)}); err != nil {
+			cn.shutdown(err)
+			return nil, err
+		}
+	}
+	c.conns[slot].Store(cn)
+	return cn, nil
 }
 
-// invalidate discards a dead mux so the next getMux dials fresh.
-func (c *Client) invalidate(slot int, dead *mux) {
-	c.muxes[slot].CompareAndSwap(dead, nil)
+// adopt puts an inbound connection from the peer into the first empty slot.
+// With no empty slot it is left serving the peer's requests only.
+func (c *Client) adopt(cn *conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	for i := range c.conns {
+		if cur := c.conns[i].Load(); cur == nil || cur.closed() {
+			c.conns[i].Store(cn)
+			return
+		}
+	}
 }
 
-// Close shuts down every connection in the pool.
+// Reap closes connections that sent or served nothing since the previous
+// Reap, always keeping one live connection.
+func (c *Client) Reap() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	live := 0
+	for i := range c.conns {
+		if cn := c.conns[i].Load(); cn != nil && !cn.closed() {
+			live++
+		}
+	}
+	for i := range c.conns {
+		cn := c.conns[i].Load()
+		if cn == nil || cn.closed() {
+			continue
+		}
+		ops := cn.ops.Load()
+		idle := ops == cn.seen && cn.inflight.Load() == 0
+		cn.seen = ops
+		if idle && live > 1 {
+			c.conns[i].Store(nil)
+			cn.shutdown(nil)
+			live--
+		}
+	}
+}
+
+// Close shuts down every connection in the pool and stops it from dialing new ones.
 func (c *Client) Close() {
-	for i := range c.muxes {
-		if m := c.muxes[i].Swap(nil); m != nil {
-			m.shutdown(nil)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	for i := range c.conns {
+		if cn := c.conns[i].Swap(nil); cn != nil {
+			cn.shutdown(nil)
 		}
 	}
 }

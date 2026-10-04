@@ -336,7 +336,7 @@ err := sessions.Atomic(ctx, "user:123", 10*time.Second, func(ctx context.Context
 ```go
 hive.Config{
     // Unique identifier for this node.
-    // Auto-generated if empty.
+    // Default: a random 16-character hex ID
     NodeID string
 
     // ModeStandalone (default) or ModeCluster.
@@ -350,6 +350,11 @@ hive.Config{
     // Default: 7946
     BindPort int
 
+    // host:port peers use to reach this node, when it differs from
+    // BindAddr:BindPort (NAT, containers, proxies).
+    // Default: BindAddr:BindPort
+    AdvertiseAddr string
+
     // Seed peer addresses (host:port) used to bootstrap cluster membership.
     // Required when Mode is ModeCluster.
     Seeds []string
@@ -357,19 +362,25 @@ hive.Config{
     // Number of nodes that store a copy of each key.
     // Higher values improve fault tolerance but increase write overhead.
     // Must be <= cluster size. Default: 1
-    // At the default of 1, replication is a no-op and each peer's
-    // replication queue is never allocated, saving memory.
+    // At the default of 1, replication is a no-op and the replicator is
+    // never started, saving memory.
     ReplicationFactor int
 
-    // How long this node waits before cancelling a routed operation
-    // (forward-to-primary or replica fan-out).
+    // Most time a request may spend reaching its primary, including waiting
+    // out a suspected one, and how long one replication batch may take.
+    // A request that can't reach its primary in time returns ErrUnavailable.
     // Default: 1s
     RoutingTimeout time.Duration
 
-    // ConnPoolSize is the number of pooled TCP connections maintained per
-    // peer, round-robin shared across all traffic to that peer (forwarded
-    // reads/writes, replication, gossip, rebalance). Higher values reduce
-    // contention under concurrent load at the cost of more sockets.
+    // How long a request waits between attempts while its primary is
+    // suspected or after a retryable failure.
+    // Default: 50ms
+    RoutingRetryInterval time.Duration
+
+    // Most TCP connections kept per peer. Each connection carries traffic in
+    // both directions. A peer starts with one connection; another is opened
+    // while every existing one is busy, and one left idle for a whole
+    // CleanupInterval is closed (one is always kept).
     // Default: 4
     ConnPoolSize int
 
@@ -393,9 +404,23 @@ hive.Config{
     // Default: 3
     GossipFanout int
 
-    // How long this node waits before cancelling a heartbeat to a peer.
+    // How long a heartbeat may take before the peer is suspected and probed.
     // Default: 300ms
     GossipTimeout time.Duration
+
+    // How long a direct ping to a suspected peer may take; pings relayed
+    // through a helper get twice as long.
+    // Default: 300ms
+    ProbeTimeout time.Duration
+
+    // How many other peers are asked to ping a suspected peer when a direct
+    // ping fails.
+    // Default: 3
+    ProbeHelpers int
+
+    // How long a probe waits before retrying when no helper answered.
+    // Default: 1s
+    ProbeInterval time.Duration
 
     // How long to wait after a topology change before rebalancing.
     // Prevents cascading migrations when multiple nodes join or leave at once.
@@ -406,8 +431,13 @@ hive.Config{
     // Default: 128
     RebalanceBatchSize int
 
-    // Max number of queued-but-unsent replication writes held per peer
-    // before writes to that peer start blocking (backpressure).
+    // How long one rebalance frame may take before the migration is
+    // retried on the next rebalance run.
+    // Default: 10s
+    RebalanceTimeout time.Duration
+
+    // Max number of queued-but-unsent replication writes held per peer.
+    // Further writes for that peer are dropped until it catches up.
     // Default: 4096
     ReplicationQueueSize int
 
@@ -415,10 +445,14 @@ hive.Config{
     // Default: 256
     ReplicationBatchSize int
 
-    // How often the cluster janitor runs to evict expired store entries
-    // and remove dead peer tombstones from the membership table.
+    // How often the janitor runs to delete expired entries, forget dead
+    // peers after DeadRetention, and close idle peer connections.
     // Default: 30s
     CleanupInterval time.Duration
+
+    // How long a dead peer is remembered, so stale gossip can't bring it back.
+    // Default: 10 × GossipInterval
+    DeadRetention time.Duration
 
     // Verbosity of internal log output written to stderr.
     // nil defaults to slog.LevelError (quiet).
@@ -436,9 +470,10 @@ hive.Config{
 
 Hive is an **ephemeral, eventually consistent** cache.
 
-- Reads and writes go to the key's primary owner as determined by consistent hashing
+- Reads and writes go to the key's primary owner as determined by consistent hashing. Replicas never serve reads or take writes; a replica only takes over a key once the old primary is declared dead and the ring makes it the new primary
+- If the primary is suspected, a request waits (retrying every `RoutingRetryInterval`) until the suspicion is resolved, for at most `RoutingTimeout` or the caller's deadline. If it can't reach a primary in time it returns `ErrUnavailable`; a write that returns `ErrUnavailable` was not applied, so it is safe to retry
 - Replication is asynchronous — replicas may be briefly behind the primary
-- Replication to each replica is ordered and applies backpressure if that replica falls behind (tunable via `ReplicationQueueSize`/`ReplicationBatchSize`), bounding memory and goroutine growth under load at the cost of writes occasionally waiting on a struggling replica rather than silently drifting out of order
+- Replication to each replica is ordered. While a replica is suspected its writes are held and delivered once it is confirmed alive; a batch resent after a timeout is recognized and applied only once. If a replica stays unreachable long enough to fill its queue (`ReplicationQueueSize`), further writes for it are dropped rather than blocking callers, and it may stay stale for those keys until they are rewritten or expire
 - When a network partition heals and keys are redistributed, Hive uses **last-write-wins (LWW)** conflict resolution: every stored entry carries a second-precision write timestamp (`mtime`), and rebalance only overwrites a local copy if the incoming entry is strictly newer. This prevents split-brain partitions from silently clobbering fresher data.
 - There is no durability — a node restart loses its local data. Surviving replicas retain their copies
 
@@ -452,12 +487,12 @@ Standalone numbers come from the same driver container running a single uncluste
 
 | Metric | Standalone | Cluster mode (cross-node) |
 |---|---|---|
-| SET, single-threaded | ~741 ns/op (~1.35M ops/sec) | ~47 μs/op (~21.5K ops/sec) |
-| GET, single-threaded | ~727 ns/op (~1.38M ops/sec) | ~53 μs/op (~19.0K ops/sec) |
-| LOCK+UNLOCK, single-threaded | ~802 ns/op (~1.25M ops/sec) | ~88 μs/op (~11.3K ops/sec) |
-| SET, 8-way concurrent | ~3.74M ops/sec | ~106.6K ops/sec |
-| GET, 8-way concurrent | ~4.09M ops/sec | ~136.5K ops/sec |
-| LOCK+UNLOCK, 8-way concurrent | ~3.00M ops/sec | ~56.0K ops/sec |
+| SET, single-threaded | ~760 ns/op (~1.32M ops/sec) | ~47 μs/op (~21.4K ops/sec) |
+| GET, single-threaded | ~748 ns/op (~1.34M ops/sec) | ~53 μs/op (~18.9K ops/sec) |
+| LOCK+UNLOCK, single-threaded | ~774 ns/op (~1.29M ops/sec) | ~89 μs/op (~11.3K ops/sec) |
+| SET, 8-way concurrent | ~3.76M ops/sec | ~104.4K ops/sec |
+| GET, 8-way concurrent | ~4.22M ops/sec | ~134.3K ops/sec |
+| LOCK+UNLOCK, 8-way concurrent | ~3.15M ops/sec | ~55.1K ops/sec |
 
 Cross-node, LOCK's cost lines up with SET/GET as expected — a round trip of two ops costs almost exactly 2× one op. Standalone the gap is much narrower, since there's no per-op network round trip for a second op to double.
 
@@ -468,12 +503,24 @@ Two different memory numbers, since they answer different questions:
 
 | Metric | Standalone | Cluster mode (relay/driver) |
 |---|---|---|
-| Node construction (`HeapAlloc` delta) | ~61 KB | ~859 KB |
-| RSS, idle (no data) | ~9.3 MB | ~11.9 MB |
-| RSS, after 1,000 keys | ~9.5 MB (+133 B/key logical) | ~14.1 MB |
-| RSS, after full run above (~100K keys) | ~37.3 MB | ~13.7 MB |
+| Node construction (`HeapAlloc` delta) | ~57 KB | ~456 KB |
+| RSS, idle (no data) | ~6.4 MB | ~8.9 MB |
+| RSS, after 1,000 keys | ~6.8 MB (+133 B/key logical) | ~11.3 MB |
+| RSS, after full run above (~100K keys) | ~48 MB | ~11.7 MB |
 
-The relay's own logical accounting (`node.MemUsed()`) stays at exactly 0 through every RSS row above — it never owns a key, so its RSS reflects only connection/gossip/forwarding state, not the data volume flowing through it; standalone's RSS instead grows with what it actually stores, from ~9.3 MB idle to ~37.3 MB holding ~100K small entries.
+The relay's own logical accounting (`node.MemUsed()`) stays at exactly 0 through every RSS row above — it never owns a key, so its RSS reflects only connection/gossip/forwarding state, not the data volume flowing through it; standalone's RSS instead grows with what it actually stores, from ~6.4 MB idle to ~48 MB holding ~100K small entries. RSS rows vary by a couple of MB between runs; the `HeapAlloc` row is stable.
+
+### Scaling with cluster size
+
+Per-peer cost is what grows as a cluster gets bigger, so it's measured separately: an in-process cluster (every node in one test process, RF=2, 4,000 writes), counting what the whole cluster holds after a GC. Totals, not per node; each TCP connection counts two file descriptors here, one for each end.
+
+| Nodes | Heap | Goroutines | File descriptors |
+|---|---|---|---|
+| 5 | ~4.6 MB | ~63 | ~48 |
+| 10 | ~10.2 MB | ~168 | ~138 |
+| 25 | ~44.5 MB | ~722 | ~645 |
+
+Connections carry traffic in both directions and the pool only grows while connections are busy, so an idle or lightly loaded peer costs about one connection. Replication runs through a single worker per node whose queues only hold memory while writes are actually waiting. For comparison, the previous major version measured ~207 MB of heap, ~5,500 goroutines and ~4,900 file descriptors for the same 25-node cluster, mostly from a replication goroutine and a preallocated 4,096-slot queue per peer.
 
 ## Data types
 
@@ -486,11 +533,14 @@ Values must be serializable by [`msgpack`](https://github.com/vmihailenco/msgpac
 
 ### Gossip and failure detection
 
-Membership state is propagated using a gossip protocol. Every node periodically sends its view of the cluster to a random subset of peers (`GossipFanout`). Each outgoing heartbeat carries an **incarnation number** — a monotonically increasing counter seeded with the current Unix timestamp when the node starts. Seeding from wall time means a restarted node's first heartbeat carries a higher incarnation than any stale dead rumor about it, allowing it to rejoin without manual intervention.
+Membership state is propagated using a gossip protocol. Every `GossipInterval` each node sends its view of the cluster to a random subset of peers (`GossipFanout`). Each entry carries an **incarnation number**, seeded with the current Unix timestamp when the node starts, so a restarted node's first heartbeat outranks any stale rumor about it.
 
-A peer's state is updated only when the incoming incarnation is strictly higher than what is locally known. This prevents stale gossip from overwriting fresh state and avoids the clock-skew problems that arise from comparing wall-clock timestamps directly across machines.
+Failure detection follows SWIM: a single failure never kills a node.
 
-Nodes that fail to respond to a heartbeat are marked dead immediately. Their keys are redistributed after `RebalanceDebounce` to allow the cluster to stabilize before migrating data.
+1. A failed heartbeat, forward, replication batch or rebalance send marks the peer **Suspect**. A Suspect peer keeps its place on the ring; requests for its keys wait for the outcome instead of being sent to a replica.
+2. The suspecting node **probes** it: a direct ping (`ProbeTimeout`), then pings relayed through up to `ProbeHelpers` other peers (twice `ProbeTimeout`). Any acknowledgement marks it Alive again. If the helpers answered but none could reach it, it is marked **Dead**, removed from the ring, and its keys are redistributed after `RebalanceDebounce`. If no helper answered at all, the prober itself may be the one cut off, so it stays Suspect and retries every `ProbeInterval` instead of declaring anyone dead. In a two-node cluster there are no helpers, so a failed direct ping means Dead.
+3. A newer incarnation always wins. At an equal incarnation the worse status wins (Dead over Suspect over Alive). A dead rumor about a peer is verified with the receiving node's own probe before it acts on it, and a node that hears it is rumored dead refutes the rumor by bumping its own incarnation.
+4. A dead peer is remembered for `DeadRetention`, so stale gossip can't bring it back before every node has heard it is dead.
 
 ### Virtual nodes and memory-proportional keyspace
 
@@ -500,10 +550,11 @@ A node configured with `hive.Bytes(0)` gets exactly zero vnodes — it joins the
 
 ### Janitor
 
-A background janitor runs every `CleanupInterval` and performs two tasks:
+A background janitor runs every `CleanupInterval` and performs three tasks:
 
 1. **Expired entry eviction** — scans the local store and removes entries whose TTL has elapsed
-2. **Tombstone cleanup** — removes dead peer records from the membership table once they are no longer needed for gossip convergence
+2. **Tombstone cleanup** — forgets peers that have been dead for at least `DeadRetention`
+3. **Idle connection reaping** — closes peer connections unused since the previous run, keeping one per peer
 
 ### Split-brain recovery
 
@@ -511,7 +562,7 @@ Each stored entry carries an `mtime` timestamp (Unix seconds, set at the time of
 
 ## Operational notes
 
-**Ports** — each node needs its `BindPort` reachable by all other nodes. In Docker/Kubernetes, expose and map the port explicitly.
+**Ports** — every node must be reachable by all other nodes at the address it advertises: `AdvertiseAddr`, which defaults to `BindAddr:BindPort`. Behind NAT or in Docker/Kubernetes, where the address peers dial differs from the one the node binds, set `AdvertiseAddr` to the reachable `host:port` and map the port explicitly.
 
 **Seeds** — at least one seed must be reachable when a node starts. Seeds do not need to be stable or permanent — any alive cluster member works.
 
@@ -521,7 +572,9 @@ Each stored entry carries an `mtime` timestamp (Unix seconds, set at the time of
 
 **Memory limits** — `MemLimit` affects both write rejection and ring weight. Nodes that exceed their limit return an error on write; they do not evict existing entries to make room. Use TTLs on keys that should not accumulate indefinitely.
 
-**Connection pool size** — each known peer gets `ConnPoolSize` connections (default 4), dialed lazily as traffic flows. Budget roughly `2 × peers × ConnPoolSize` sockets per node; for very large clusters, raise `ulimit -n` or lower `ConnPoolSize`.
+**Connection pool size** — connections carry traffic in both directions, so two peers share them. A peer pair starts with one connection and grows to at most `ConnPoolSize` (default 4) only while every connection is busy; idle ones are closed by the janitor. Budget at most `peers × ConnPoolSize` sockets per node; a lightly loaded cluster uses about one per peer.
+
+**Upgrading** — the peer wire format changed in this major version, so nodes of different major versions can't form a cluster. Upgrade by replacing the whole cluster rather than rolling node by node; since Hive holds no durable state, a fresh cluster starts empty either way.
 
 ## Development
 
