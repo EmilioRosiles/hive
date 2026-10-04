@@ -26,15 +26,18 @@ var errNoHandler = errors.New("transport: no handler for inbound request")
 // loop routes each response, by frame ID, to the goroutine that sent the
 // request, and serves each inbound request with handler.
 type conn struct {
-	nc      net.Conn
-	w       *frameWriter
-	pending sync.Map // map[uint32]chan Frame
-	nextID  atomic.Uint32
-	handler Handler
-	onHello func(nodeID string, c *conn)
-	done    chan struct{}
-	once    sync.Once
-	logger  *slog.Logger
+	nc       net.Conn
+	w        *frameWriter
+	pending  sync.Map // map[uint32]chan Frame
+	nextID   atomic.Uint32
+	inflight atomic.Int32  // requests being sent or served right now
+	ops      atomic.Uint64 // requests sent or served so far
+	seen     uint64        // ops at the previous Client.Reap; only Reap touches it
+	handler  Handler
+	onHello  func(nodeID string, c *conn)
+	done     chan struct{}
+	once     sync.Once
+	logger   *slog.Logger
 }
 
 func newConn(nc net.Conn, handler Handler, logger *slog.Logger) *conn {
@@ -53,6 +56,9 @@ func (c *conn) send(ctx context.Context, frame Frame) (Frame, error) {
 	if c.closed() {
 		return Frame{}, fmt.Errorf("mux: send: %w: %w", ErrUnsent, ErrMuxClosed)
 	}
+	c.inflight.Add(1)
+	defer c.inflight.Add(-1)
+	c.ops.Add(1)
 
 	id := c.nextID.Add(1)
 	frame.ID = id
@@ -109,14 +115,17 @@ func (c *conn) readLoop() {
 				go c.onHello(string(frame.Payload), c)
 			}
 		default:
+			c.inflight.Add(1)
+			c.ops.Add(1)
 			go c.serve(frame)
 		}
 	}
 }
 
-// serve runs handler for an inbound request and writes the response back
-// under the same ID.
+// serve runs handler for an inbound request, counted in inflight by readLoop,
+// and writes the response back under the same ID.
 func (c *conn) serve(f Frame) {
+	defer c.inflight.Add(-1)
 	var payload []byte
 	err := errNoHandler
 	if c.handler != nil {

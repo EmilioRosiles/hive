@@ -58,8 +58,9 @@ type Config struct {
 	// its primary is suspected or after a retryable failure. Defaults to 50ms.
 	RoutingRetryInterval time.Duration
 
-	// ConnPoolSize is the number of pooled connections maintained per peer,
-	// round-robin shared across all traffic to that peer. Defaults to 4.
+	// ConnPoolSize is the most connections kept per peer. A peer starts with one;
+	// another is opened while every connection is busy, and one idle for a
+	// whole CleanupInterval is closed. Defaults to 4.
 	ConnPoolSize int
 
 	// MemLimit is the maximum memory this node intends to use.

@@ -357,8 +357,9 @@ func (m *Cluster) handlePing(payload []byte) []byte {
 	return []byte{byte(probeAck)}
 }
 
-// startJanitor runs the cleanup loop until the node shuts down.
-// On each tick it removes expired store entries and evicts dead-peer tombstones.
+// startJanitor runs the cleanup loop until the node shuts down. On each tick
+// it removes expired store entries, evicts dead-peer tombstones, and closes
+// peer connections left idle since the previous tick.
 func (m *Cluster) startJanitor() {
 	ticker := time.NewTicker(m.cfg.CleanupInterval)
 	defer ticker.Stop()
@@ -367,9 +368,23 @@ func (m *Cluster) startJanitor() {
 		case <-ticker.C:
 			m.store.DeleteExpired()
 			m.evictDeadPeers()
+			m.reapConns()
 		case <-m.stopCh:
 			return
 		}
+	}
+}
+
+// reapConns closes idle connections to every peer, keeping one per peer.
+func (m *Cluster) reapConns() {
+	m.mu.RLock()
+	clients := make([]*transport.Client, 0, len(m.clients))
+	for _, c := range m.clients {
+		clients = append(clients, c)
+	}
+	m.mu.RUnlock()
+	for _, c := range clients {
+		c.Reap()
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -107,91 +108,202 @@ func TestClient_ConcurrentSends_MultiplexedOverOneConnection(t *testing.T) {
 	}
 }
 
-func TestClient_Pool_RoundRobinAcrossDistinctConnections(t *testing.T) {
-	handler := func(msgType MsgType, payload []byte) ([]byte, error) { return payload, nil }
-	s := startTestServer(t, handler)
+// liveConns counts c's open connections.
+func liveConns(c *Client) int {
+	n := 0
+	for i := range c.conns {
+		if cn := c.conns[i].Load(); cn != nil && !cn.closed() {
+			n++
+		}
+	}
+	return n
+}
 
+// fillPool dials connections into every free slot of c.
+func fillPool(t *testing.T, c *Client) []*conn {
+	t.Helper()
+	for range c.conns {
+		if _, err := c.grow(false); err != nil {
+			t.Fatalf("grow: %v", err)
+		}
+	}
+	conns := make([]*conn, len(c.conns))
+	for i := range c.conns {
+		conns[i] = c.conns[i].Load()
+	}
+	return conns
+}
+
+func TestClient_Pool_SequentialSendsUseOneConnection(t *testing.T) {
+	s := startTestServer(t, func(_ MsgType, payload []byte) ([]byte, error) { return payload, nil })
+	client := NewClient(s.Addr().String(), "", nil, nil, 3, slog.Default())
+	defer client.Close()
+
+	for range 10 {
+		if _, err := client.Send(t.Context(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	if n := liveConns(client); n != 1 {
+		t.Errorf("%d connections for sequential sends, want 1", n)
+	}
+}
+
+func TestClient_Pool_ColdStartDialsOnce(t *testing.T) {
+	s := startTestServer(t, func(_ MsgType, payload []byte) ([]byte, error) { return payload, nil })
+	client := NewClient(s.Addr().String(), "", nil, nil, 3, slog.Default())
+	defer client.Close()
+
+	client.mu.Lock()
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := client.pick(); err != nil {
+				t.Errorf("pick: %v", err)
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	client.mu.Unlock()
+	wg.Wait()
+
+	if n := liveConns(client); n != 1 {
+		t.Errorf("%d connections dialed by concurrent callers on a cold pool, want 1", n)
+	}
+}
+
+func TestClient_Pool_GrowsWhileBusy_UpToPoolSize(t *testing.T) {
+	gate := make(chan struct{})
+	s := startTestServer(t, func(MsgType, []byte) ([]byte, error) {
+		<-gate
+		return nil, nil
+	})
 	const poolSize = 3
 	client := NewClient(s.Addr().String(), "", nil, nil, poolSize, slog.Default())
 	defer client.Close()
 
-	for i := 0; i < poolSize; i++ {
-		if _, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
-			t.Fatalf("Send: %v", err)
+	errs := make(chan error, 2*poolSize)
+	for range 2 * poolSize {
+		go func() {
+			_, err := client.Send(t.Context(), Frame{Type: MsgForward})
+			errs <- err
+		}()
+		time.Sleep(20 * time.Millisecond)
+	}
+	inflight := func() (total int32) {
+		for i := range client.conns {
+			if cn := client.conns[i].Load(); cn != nil {
+				total += cn.inflight.Load()
+			}
+		}
+		return total
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for inflight() < 2*poolSize && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := liveConns(client); n != poolSize {
+		t.Errorf("%d connections while every one is busy, want %d", n, poolSize)
+	}
+	for i := range client.conns {
+		if cn := client.conns[i].Load(); cn == nil || cn.inflight.Load() == 0 {
+			t.Errorf("slot %d carries no request: sends should go to the least busy connection", i)
 		}
 	}
-
-	seen := make(map[*conn]bool)
-	for i := range client.conns {
-		m := client.conns[i].Load()
-		if m == nil {
-			t.Fatalf("slot %d: never dialed", i)
+	close(gate)
+	for range 2 * poolSize {
+		if err := <-errs; err != nil {
+			t.Errorf("Send: %v", err)
 		}
-		if seen[m] {
-			t.Fatalf("slot %d: mux reused from another slot, want %d distinct connections", i, poolSize)
-		}
-		seen[m] = true
 	}
 }
 
 func TestClient_Pool_CloseClosesAllConnections(t *testing.T) {
-	handler := func(msgType MsgType, payload []byte) ([]byte, error) { return payload, nil }
-	s := startTestServer(t, handler)
-
-	const poolSize = 3
-	client := NewClient(s.Addr().String(), "", nil, nil, poolSize, slog.Default())
-	for i := 0; i < poolSize; i++ {
-		if _, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
-			t.Fatalf("Send: %v", err)
-		}
-	}
-
-	conns := make([]*conn, poolSize)
-	for i := range client.conns {
-		conns[i] = client.conns[i].Load()
-	}
+	s := startTestServer(t, func(_ MsgType, payload []byte) ([]byte, error) { return payload, nil })
+	client := NewClient(s.Addr().String(), "", nil, nil, 3, slog.Default())
+	conns := fillPool(t, client)
 
 	client.Close()
 
-	for i, m := range conns {
-		if !m.closed() {
-			t.Errorf("slot %d: mux still open after Close", i)
+	for i, cn := range conns {
+		if !cn.closed() {
+			t.Errorf("slot %d: connection still open after Close", i)
 		}
 	}
 }
 
-func TestClient_Pool_ReconnectsOnlyDeadSlot(t *testing.T) {
-	handler := func(msgType MsgType, payload []byte) ([]byte, error) { return payload, nil }
-	s := startTestServer(t, handler)
-
-	const poolSize = 2
-	client := NewClient(s.Addr().String(), "", nil, nil, poolSize, slog.Default())
+func TestClient_Pool_DeadConnReplaced(t *testing.T) {
+	s := startTestServer(t, func(_ MsgType, payload []byte) ([]byte, error) { return payload, nil })
+	client := NewClient(s.Addr().String(), "", nil, nil, 2, slog.Default())
 	defer client.Close()
-
-	for i := 0; i < poolSize; i++ {
-		if _, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
-			t.Fatalf("Send: %v", err)
-		}
+	if _, err := client.Send(t.Context(), Frame{Type: MsgForward}); err != nil {
+		t.Fatalf("Send: %v", err)
 	}
-
-	live := client.conns[1].Load()
 	dead := client.conns[0].Load()
-	dead.shutdown(nil) // simulate slot 0's connection dying
+	dead.shutdown(nil)
 
-	for i := 0; i < poolSize; i++ {
-		if _, err := client.Send(context.Background(), Frame{Type: MsgForward, Payload: []byte("x")}); err != nil {
-			t.Fatalf("Send after slot 0 died: %v", err)
-		}
+	if _, err := client.Send(t.Context(), Frame{Type: MsgForward}); err != nil {
+		t.Fatalf("Send after the connection died: %v", err)
 	}
+	if n := liveConns(client); n != 1 {
+		t.Errorf("%d live connections, want 1 replacing the dead one", n)
+	}
+}
 
-	if client.conns[0].Load() == dead {
-		t.Error("slot 0: still pointing at the dead mux, want a fresh redialed one")
+func TestConn_ServedRequestCountsAsUse(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	cn := newConn(a, func(MsgType, []byte) ([]byte, error) { return nil, nil }, slog.Default())
+	go cn.readLoop()
+	defer cn.shutdown(nil)
+
+	if err := WriteFrame(b, Frame{ID: 1, Type: MsgForward}); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
 	}
-	if got := client.conns[0].Load(); got == nil || got.closed() {
-		t.Error("slot 0: expected a live redialed connection")
+	if _, err := ReadFrame(b); err != nil {
+		t.Fatalf("ReadFrame: %v", err)
 	}
-	if client.conns[1].Load() != live {
-		t.Error("slot 1: should be untouched by slot 0's reconnect")
+	if got := cn.ops.Load(); got != 1 {
+		t.Errorf("ops = %d after serving one request, want 1", got)
+	}
+}
+
+func TestClient_Reap_ClosesIdleKeepsOne(t *testing.T) {
+	s := startTestServer(t, func(_ MsgType, payload []byte) ([]byte, error) { return payload, nil })
+	client := NewClient(s.Addr().String(), "", nil, nil, 3, slog.Default())
+	defer client.Close()
+	fillPool(t, client)
+
+	client.Reap()
+
+	if n := liveConns(client); n != 1 {
+		t.Errorf("%d connections after reaping an idle pool, want 1", n)
+	}
+}
+
+func TestClient_Reap_KeepsUsedAndBusyConns(t *testing.T) {
+	s := startTestServer(t, func(_ MsgType, payload []byte) ([]byte, error) { return payload, nil })
+	client := NewClient(s.Addr().String(), "", nil, nil, 3, slog.Default())
+	defer client.Close()
+	conns := fillPool(t, client)
+	if _, err := conns[1].send(t.Context(), Frame{Type: MsgForward}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	conns[2].inflight.Add(1)
+	defer conns[2].inflight.Add(-1)
+
+	client.Reap()
+
+	if !conns[0].closed() {
+		t.Error("an idle connection was kept")
+	}
+	if conns[1].closed() {
+		t.Error("a connection used since the last Reap was closed")
+	}
+	if conns[2].closed() {
+		t.Error("a connection with a request in flight was closed")
 	}
 }
 
