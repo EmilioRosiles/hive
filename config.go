@@ -24,7 +24,7 @@ const (
 // Config holds all configuration for a Hive node.
 type Config struct {
 	// NodeID is a unique identifier for this node.
-	// Defaults to a generated UUID if empty.
+	// Defaults to a random 16-character hex ID if empty.
 	NodeID string
 
 	// Mode controls standalone vs cluster operation.
@@ -51,8 +51,8 @@ type Config struct {
 
 	// ReplicationFactor is the number of nodes that should hold a copy
 	// of each key. Must be <= cluster size. Defaults to 1.
-	// At the default of 1, replication is a no-op and each peer's
-	// replication queue is never allocated, saving memory.
+	// At the default of 1, replication is a no-op and the replicator is
+	// never started, saving memory.
 	ReplicationFactor int
 
 	// RoutingTimeout is the most time a request may spend reaching its
@@ -80,23 +80,23 @@ type Config struct {
 	MemLimit MemLimit
 
 	// GossipInterval is how often this node sends heartbeats to peers.
-	// Defaults to 1s.
+	// Defaults to 5s.
 	GossipInterval time.Duration
 
 	// GossipFanout is how many peers receive each heartbeat round.
 	// Defaults to 3.
 	GossipFanout int
 
-	// GossipTimeout is how long this nodes waits before cancelling a heartbeat to a peer.
-	// Defaults to 300ms.
+	// GossipTimeout is how long a heartbeat to a peer may take before the peer
+	// is suspected and probed. Defaults to 300ms.
 	GossipTimeout time.Duration
 
 	// ProbeTimeout is how long a direct ping to a suspected peer may take;
 	// pings relayed through a helper get twice as long. Defaults to 300ms.
 	ProbeTimeout time.Duration
 
-	// ProbeHelpers is how many alive peers are asked to ping a suspected peer
-	// when a direct ping fails. Defaults to 3.
+	// ProbeHelpers is how many other peers (any not known Dead) are asked to
+	// ping a suspected peer when a direct ping fails. Defaults to 3.
 	ProbeHelpers int
 
 	// ProbeInterval is how long a probe waits before retrying when no helper
@@ -125,9 +125,9 @@ type Config struct {
 	// to a peer in one batch. Defaults to 256.
 	ReplicationBatchSize int
 
-	// CleanupInterval is how often the cluster janitor runs to evict dead peer
-	// tombstones and expired store entries.
-	// Default: 30s
+	// CleanupInterval is how often the janitor runs to delete expired entries,
+	// forget dead peers after DeadRetention, and close idle peer connections.
+	// Defaults to 30s.
 	CleanupInterval time.Duration
 
 	// DeadRetention is how long a dead peer is remembered before the janitor
