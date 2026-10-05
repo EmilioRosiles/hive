@@ -27,6 +27,7 @@ const (
 	KindHash
 	KindList
 	KindZSet
+	KindBitmap
 )
 
 // DecodeFunc deserializes a DataStructure from bytes produced by its Encode method.
@@ -144,11 +145,12 @@ func NewDataStore(memLimit uint64) *DataStore {
 		shardsCount: n,
 		capacity:    int64(memLimit),
 		decoders: map[Kind]DecodeFunc{
-			KindValue: func(data []byte) (DataStructure, error) { return DecodeValueStructure(data) },
-			KindSet:   func(data []byte) (DataStructure, error) { return DecodeSetStructure(data) },
-			KindHash:  func(data []byte) (DataStructure, error) { return DecodeHashStructure(data) },
-			KindList:  func(data []byte) (DataStructure, error) { return DecodeListStructure(data) },
-			KindZSet:  func(data []byte) (DataStructure, error) { return DecodeZSetStructure(data) },
+			KindValue:  func(data []byte) (DataStructure, error) { return DecodeValueStructure(data) },
+			KindSet:    func(data []byte) (DataStructure, error) { return DecodeSetStructure(data) },
+			KindHash:   func(data []byte) (DataStructure, error) { return DecodeHashStructure(data) },
+			KindList:   func(data []byte) (DataStructure, error) { return DecodeListStructure(data) },
+			KindZSet:   func(data []byte) (DataStructure, error) { return DecodeZSetStructure(data) },
+			KindBitmap: func(data []byte) (DataStructure, error) { return DecodeBitmapStructure(data) },
 		},
 	}
 	for i := range n {

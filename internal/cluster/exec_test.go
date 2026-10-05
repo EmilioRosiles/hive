@@ -144,6 +144,79 @@ func TestExecSCard_ReturnsCount(t *testing.T) {
 	}
 }
 
+// -- bitmap ops --
+
+// bitSetArgs builds the args slice execBitSet expects: offset then a 0/1 byte.
+func bitSetArgs(offset uint32, on bool) [][]byte {
+	v := byte(0)
+	if on {
+		v = 1
+	}
+	return [][]byte{encodeUint32(offset), {v}}
+}
+
+func TestExecBitSet_SetsBit(t *testing.T) {
+	m := newTestCluster("self")
+	if _, err := execBitSet(m, "b", bitSetArgs(42, true), 0); err != nil {
+		t.Fatalf("execBitSet: %v", err)
+	}
+
+	results, err := execBitGet(m, "b", [][]byte{encodeUint32(42)}, 0)
+	if err != nil {
+		t.Fatalf("execBitGet: %v", err)
+	}
+	if results[0][0] != 1 {
+		t.Error("bit 42 should be set")
+	}
+	results, _ = execBitGet(m, "b", [][]byte{encodeUint32(41)}, 0)
+	if results[0][0] != 0 {
+		t.Error("bit 41 should be clear")
+	}
+}
+
+func TestExecBitSet_ClearOnMissingKey_DoesNotCreate(t *testing.T) {
+	m := newTestCluster("self")
+	if _, err := execBitSet(m, "b", bitSetArgs(42, false), 0); err != nil {
+		t.Fatalf("execBitSet: %v", err)
+	}
+	if _, ok := m.store.Get("b"); ok {
+		t.Error("clearing a bit on a missing key should not create it")
+	}
+}
+
+func TestExecBitSet_WrongKind_ReturnsTypeMismatch(t *testing.T) {
+	m := newTestCluster("self")
+	execSAdd(m, "k", [][]byte{[]byte("a")}, 0)
+
+	if _, err := execBitSet(m, "k", bitSetArgs(1, true), 0); !errors.Is(err, errTypeMismatch) {
+		t.Errorf("got %v, want errTypeMismatch", err)
+	}
+}
+
+func TestExecBitGet_MissingKey_ReturnsFalse(t *testing.T) {
+	m := newTestCluster("self")
+	results, err := execBitGet(m, "missing", [][]byte{encodeUint32(0)}, 0)
+	if err != nil {
+		t.Fatalf("execBitGet: %v", err)
+	}
+	if results[0][0] != 0 {
+		t.Error("bit on missing key should be clear")
+	}
+}
+
+func TestExecBitCount_ReturnsCount(t *testing.T) {
+	m := newTestCluster("self")
+	execBitSet(m, "b", bitSetArgs(0, true), 0)
+	execBitSet(m, "b", bitSetArgs(100, true), 0)
+	execBitSet(m, "b", bitSetArgs(100000, true), 0)
+	execBitSet(m, "b", bitSetArgs(100, false), 0)
+
+	results, _ := execBitCount(m, "b", nil, 0)
+	if count := decodeUint64(results[0]); count != 2 {
+		t.Errorf("got %d, want 2", count)
+	}
+}
+
 // -- hash ops --
 
 func TestExecHSet_StoresField(t *testing.T) {

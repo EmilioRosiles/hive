@@ -75,6 +75,10 @@ var opRegistry = map[transport.Op]opDef{
 	transport.OpZRange:        {Exec: execZRange, Scope: ScopeRead},
 	transport.OpZRangeByScore: {Exec: execZRangeByScore, Scope: ScopeRead},
 	transport.OpZRevRank:      {Exec: execZRevRank, Scope: ScopeRead},
+
+	transport.OpBitSet:   {Exec: execBitSet, Scope: ScopeWrite},
+	transport.OpBitGet:   {Exec: execBitGet, Scope: ScopeRead},
+	transport.OpBitCount: {Exec: execBitCount, Scope: ScopeRead},
 }
 
 // -- arg index constants --
@@ -126,6 +130,13 @@ const (
 
 const (
 	argValueSetData = 0 // []byte
+)
+
+const (
+	argBitSetOffset = 0 // uint32 big-endian
+	argBitSetValue  = 1 // 1 byte, 0 or 1
+
+	argBitGetOffset = 0 // uint32 big-endian
 )
 
 const (
@@ -876,4 +887,76 @@ func asOrNewZSet(ds store.DataStructure) *store.ZSetStructure {
 		return nil
 	}
 	return z
+}
+
+// -- bitmap ops --
+
+func execBitSet(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
+	offset := decodeUint32(args, argBitSetOffset)
+	on := len(args[argBitSetValue]) > 0 && args[argBitSetValue][0] == 1
+	return nil, m.store.Apply(key, func(ds store.DataStructure) (store.DataStructure, error) {
+		if err := store.CheckLock(ds, token); err != nil {
+			return ds, err
+		}
+		if ds == nil && !on {
+			return nil, nil
+		}
+		b := asOrNewBitmap(ds)
+		if b == nil {
+			return nil, errNotABitmap
+		}
+		b.SetBit(offset, on)
+		return b, nil
+	})
+}
+
+func execBitGet(m *Cluster, key string, args [][]byte, token uint32) ([][]byte, error) {
+	offset := decodeUint32(args, argBitGetOffset)
+	var result bool
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
+		if b, ok := ds.(*store.BitmapStructure); ok {
+			result = b.GetBit(offset)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result {
+		return [][]byte{{1}}, nil
+	}
+	return [][]byte{{0}}, nil
+}
+
+func execBitCount(m *Cluster, key string, _ [][]byte, token uint32) ([][]byte, error) {
+	var count int
+	err := m.store.Read(key, func(ds store.DataStructure) error {
+		if err := store.CheckLock(ds, token); err != nil {
+			return err
+		}
+		if b, ok := ds.(*store.BitmapStructure); ok {
+			count = b.Count()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return [][]byte{encodeUint64(uint64(count))}, nil
+}
+
+// asOrNewBitmap returns ds cast to *store.BitmapStructure, or a new one if ds is nil.
+// Returns nil if ds is a different type.
+func asOrNewBitmap(ds store.DataStructure) *store.BitmapStructure {
+	if ds == nil {
+		return store.NewBitmapStructure()
+	}
+	b, ok := ds.(*store.BitmapStructure)
+	if !ok {
+		return nil
+	}
+	return b
 }

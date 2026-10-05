@@ -44,6 +44,9 @@ var errNotAList = fmt.Errorf("%w: expected list", errTypeMismatch)
 // errNotAZSet wraps errTypeMismatch with the expected kind.
 var errNotAZSet = fmt.Errorf("%w: expected zset", errTypeMismatch)
 
+// errNotABitmap wraps errTypeMismatch with the expected kind.
+var errNotABitmap = fmt.Errorf("%w: expected bitmap", errTypeMismatch)
+
 // remoteErrors are the public sentinels a forwarded op can return.
 var remoteErrors = []error{ErrNotFound, ErrKeyLocked, ErrLockNotHeld, store.ErrCapacityExceeded}
 

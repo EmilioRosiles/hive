@@ -79,6 +79,49 @@ func TestCluster_SetStoreAcrossNodes(t *testing.T) {
 	}
 }
 
+// TestCluster_BitmapRebalanceOnJoin verifies bitmaps are readable from every
+// node, before and after a join migrates some of them to the new node.
+func TestCluster_BitmapRebalanceOnJoin(t *testing.T) {
+	n1, c1 := clusterNode(t, nil, 1)
+	n2, c2 := clusterNode(t, []string{addr(n1)}, 1)
+
+	waitFor(t, 1*time.Second, "2-node cluster formed", func() bool {
+		return n1.Cluster().AliveCount() == 2 && n2.Cluster().AliveCount() == 2
+	})
+
+	const nkeys = 30
+	bm1 := hive.NewBitmapStore(c1, "dau")
+	for i := range nkeys {
+		key := fmt.Sprintf("day-%d", i)
+		if err := bm1.SetBit(t.Context(), key, uint32(i), true); err != nil {
+			t.Fatalf("SetBit %q: %v", key, err)
+		}
+		if err := bm1.SetBit(t.Context(), key, 100_000, true); err != nil {
+			t.Fatalf("SetBit %q: %v", key, err)
+		}
+	}
+
+	n3, c3 := clusterNode(t, []string{addr(n1)}, 1)
+	waitFor(t, 1*time.Second, "3-node cluster formed", func() bool {
+		return n1.Cluster().AliveCount() == 3 && n3.Cluster().AliveCount() == 3
+	})
+	time.Sleep(300 * time.Millisecond) // let rebalance settle
+
+	stores := []*hive.BitmapStore{bm1, hive.NewBitmapStore(c2, "dau"), hive.NewBitmapStore(c3, "dau")}
+	for i := range nkeys {
+		key := fmt.Sprintf("day-%d", i)
+		for node, s := range stores {
+			on, err := s.GetBit(t.Context(), key, uint32(i))
+			if err != nil || !on {
+				t.Errorf("node %d GetBit %q: got (%v, %v)", node+1, key, on, err)
+			}
+			if n, err := s.Count(t.Context(), key); err != nil || n != 2 {
+				t.Errorf("node %d Count %q: got (%d, %v), want 2", node+1, key, n, err)
+			}
+		}
+	}
+}
+
 // TestCluster_RebalanceOnJoin_ValueIntegrity verifies that after a new node
 // joins and rebalance migrates keys, every node returns the correct values —
 // not just a non-error response.

@@ -119,6 +119,7 @@ online    := hive.NewSetStore(cluster, "online_users")
 streams   := hive.NewHashStore[Stream](cluster, "streams")
 queue     := hive.NewListStore[Task](cluster, "work_queue")
 scores    := hive.NewZSetStore(cluster, "leaderboard")
+dau       := hive.NewBitmapStore(cluster, "dau")
 ```
 
 Each store type maps to a Redis-style API.
@@ -281,6 +282,29 @@ scores.Expire(ctx, "game:1", 24*time.Hour)
 ```
 
 `ZRange` and `ZRangeByScore` return `[]ZSetEntry`, where each entry has `Member string` and `Score float64`.
+
+### BitmapStore
+
+A distributed packed bit array, one bit per offset. Useful for large sets of per-ID boolean flags like daily active users or feature rollouts, where a `SetStore` would cost a full entry per ID.
+
+```go
+dau := hive.NewBitmapStore(cluster, "dau")
+
+// SetBit sets or clears the bit at offset.
+dau.SetBit(ctx, "2026-08-22", 123456, true)
+
+// GetBit reports whether the bit at offset is set. Unset and missing keys read as false.
+on, err := dau.GetBit(ctx, "2026-08-22", 123456)
+
+// Count returns the number of set bits.
+n, err := dau.Count(ctx, "2026-08-22")
+
+// Del removes the entire bitmap. Expire sets a key-level TTL.
+dau.Del(ctx, "2026-08-22")
+dau.Expire(ctx, "2026-08-22", 48*time.Hour)
+```
+
+Offsets are `uint32`. A bitmap grows to fit the highest bit set, so its memory is `offset/8` bytes regardless of how many bits are set — keep offsets dense (e.g. sequential user IDs, not hashes).
 
 ## TTL behavior
 

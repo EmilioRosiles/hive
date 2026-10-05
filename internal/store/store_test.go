@@ -57,6 +57,7 @@ func TestStructSizes_NoAccidentalPadding(t *testing.T) {
 		{"HashStructure", unsafe.Sizeof(HashStructure{}), 32},
 		{"ListStructure", unsafe.Sizeof(ListStructure{}), 64},
 		{"ZSetStructure", unsafe.Sizeof(ZSetStructure{}), 72},
+		{"BitmapStructure", unsafe.Sizeof(BitmapStructure{}), 48},
 	}
 	for _, c := range cases {
 		if c.size != c.want {
