@@ -216,6 +216,102 @@ func TestHashStore_DelField(t *testing.T) {
 	}
 }
 
+// -- BitmapStore --
+
+func TestBitmapStore_SetGetBit(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewBitmapStore(cache, "dau")
+
+	if err := store.SetBit(t.Context(), "day:1", 123456, true); err != nil {
+		t.Fatalf("SetBit: %v", err)
+	}
+	on, err := store.GetBit(t.Context(), "day:1", 123456)
+	if err != nil || !on {
+		t.Fatalf("GetBit set: got (%v, %v)", on, err)
+	}
+	on, err = store.GetBit(t.Context(), "day:1", 123457)
+	if err != nil || on {
+		t.Fatalf("GetBit unset: got (%v, %v)", on, err)
+	}
+	on, err = store.GetBit(t.Context(), "missing", 0)
+	if err != nil || on {
+		t.Fatalf("GetBit missing key: got (%v, %v)", on, err)
+	}
+}
+
+func TestBitmapStore_Count(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewBitmapStore(cache, "dau")
+
+	for _, id := range []uint32{1, 2, 3, 1_000_000} {
+		store.SetBit(t.Context(), "day:1", id, true)
+	}
+	store.SetBit(t.Context(), "day:1", 2, false)
+
+	n, err := store.Count(t.Context(), "day:1")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("Count: got %d, want 3", n)
+	}
+}
+
+func TestBitmapStore_Del(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewBitmapStore(cache, "dau")
+
+	store.SetBit(t.Context(), "day:1", 7, true)
+	if err := store.Del(t.Context(), "day:1"); err != nil {
+		t.Fatalf("Del: %v", err)
+	}
+	n, err := store.Count(t.Context(), "day:1")
+	if err != nil || n != 0 {
+		t.Fatalf("Count after Del: got (%d, %v), want 0", n, err)
+	}
+}
+
+func TestBitmapStore_KeyExpiry(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewBitmapStore(cache, "dau")
+
+	store.SetBit(t.Context(), "day:1", 7, true)
+	store.Expire(t.Context(), "day:1", 1100*time.Millisecond)
+
+	time.Sleep(1300 * time.Millisecond)
+
+	n, err := store.Count(t.Context(), "day:1")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("Count after key expiry: got %d, want 0", n)
+	}
+}
+
+func TestBitmapStore_Lock(t *testing.T) {
+	cache := standalone(t)
+	store := hive.NewBitmapStore(cache, "dau")
+
+	store.SetBit(t.Context(), "day:1", 7, true)
+	lock, err := store.Lock(t.Context(), "day:1", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	if err := store.SetBit(t.Context(), "day:1", 8, true); !errors.Is(err, hive.ErrKeyLocked) {
+		t.Fatalf("SetBit while locked: got %v, want ErrKeyLocked", err)
+	}
+	if err := store.SetBit(lock.Context(t.Context()), "day:1", 8, true); err != nil {
+		t.Fatalf("SetBit with lock context: %v", err)
+	}
+	if err := lock.Unlock(t.Context()); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	if n, _ := store.Count(t.Context(), "day:1"); n != 2 {
+		t.Fatalf("Count: got %d, want 2", n)
+	}
+}
+
 // -- Namespace isolation --
 
 func TestNamespaceIsolation(t *testing.T) {

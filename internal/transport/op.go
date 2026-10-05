@@ -2,7 +2,8 @@ package transport
 
 // Op identifies the operation being forwarded.
 // Shared ops (Del, Expire) work for any DataStructure kind.
-// Kind-specific ops are grouped in ranges: Value=10-19, Set=50-59, Hash=100-109.
+// Kind-specific ops are grouped in ranges: Value=10-19, Set=50-59, Hash=100-109,
+// List=150-159, ZSet=170-179, Bitmap=190-199.
 type Op uint8
 
 const (
@@ -50,4 +51,9 @@ const (
 	OpZRange        Op = 175
 	OpZRangeByScore Op = 176
 	OpZRevRank      Op = 177
+
+	// Bitmap ops.
+	OpBitSet   Op = 190
+	OpBitGet   Op = 191
+	OpBitCount Op = 192
 )
